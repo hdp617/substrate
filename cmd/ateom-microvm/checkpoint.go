@@ -157,7 +157,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	if durable {
 		g.Go(func() error {
 			t := time.Now()
-			if err := tarDurableVolumes(gctx, ateompath.DurableDirVolumeMountsDir(actorUID), checkpointDir); err != nil {
+			if err := captureDurableVolumes(gctx, ateompath.DurableDirVolumeMountsDir(actorUID), checkpointDir); err != nil {
 				return err
 			}
 			dDurable = time.Since(t)

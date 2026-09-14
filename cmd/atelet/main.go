@@ -936,12 +936,15 @@ func (s *AteomHerder) uploadLocalCheckpointDir(ctx context.Context, req *ateletp
 func narrowFullCaptureToData(rec *sandboxAssetsRecord) error {
 	switch atev1alpha1.SandboxClass(rec.SandboxClass) {
 	case atev1alpha1.SandboxClassMicroVM, atev1alpha1.SandboxClassGvisor:
-		if !slices.Contains(rec.SnapshotFiles, ateompath.DurableDirTarFile) {
+		durable := slices.DeleteFunc(slices.Clone(rec.SnapshotFiles), func(f string) bool {
+			return !ateompath.DurableDirSnapshotFile(f)
+		})
+		if len(durable) == 0 {
 			// No durable-dir volumes were attached at pause: this snapshot
 			// holds no data, and never will — not retryable.
-			return status.Errorf(codes.FailedPrecondition, "full %s capture has no %s; the actor has no durable data to upload as %s", rec.SandboxClass, ateompath.DurableDirTarFile, ateattr.SnapshotScopeData)
+			return status.Errorf(codes.FailedPrecondition, "full %s capture has no durable-dir files; the actor has no durable data to upload as %s", rec.SandboxClass, ateattr.SnapshotScopeData)
 		}
-		rec.SnapshotFiles = []string{ateompath.DurableDirTarFile}
+		rec.SnapshotFiles = durable
 		rec.Scope = ateattr.SnapshotScopeData
 		return nil
 

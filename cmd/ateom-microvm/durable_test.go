@@ -107,3 +107,116 @@ func TestDurableVolumesRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestDurableRawDisksRoundTrip(t *testing.T) {
+	t.Setenv(durableBackendEnvVar, durableBackendRawDisk)
+
+	src := t.TempDir()
+	checkpointDir := t.TempDir()
+	dst := t.TempDir()
+
+	// Create raw disk images in src directory.
+	volFiles := map[string]string{
+		"workspace.raw": "ext4-dummy-header-1234",
+		"cache.raw":     "ext4-dummy-header-5678",
+	}
+	for name, content := range volFiles {
+		p := filepath.Join(src, name)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatalf("writing %q: %v", name, err)
+		}
+	}
+
+	// Capture: under raw-disk, files are hard-linked in sub-millisecond time.
+	if err := captureDurableVolumes(t.Context(), src, checkpointDir); err != nil {
+		t.Fatalf("captureDurableVolumes: %v", err)
+	}
+
+	for name := range volFiles {
+		srcPath := filepath.Join(src, name)
+		snapPath := filepath.Join(checkpointDir, name)
+
+		srcStat, err := os.Stat(srcPath)
+		if err != nil {
+			t.Fatalf("stat src %q: %v", srcPath, err)
+		}
+		snapStat, err := os.Stat(snapPath)
+		if err != nil {
+			t.Fatalf("stat snapshot %q: %v", snapPath, err)
+		}
+		if !os.SameFile(srcStat, snapStat) {
+			t.Errorf("%s was copied rather than hardlinked into the checkpoint", name)
+		}
+	}
+
+	// Restore: hardlinks or copies from snapshot into destination.
+	if err := restoreDurableVolumes(dst, checkpointDir); err != nil {
+		t.Fatalf("restoreDurableVolumes: %v", err)
+	}
+
+	for name, want := range volFiles {
+		got, err := os.ReadFile(filepath.Join(dst, name))
+		if err != nil {
+			t.Errorf("reading restored %q: %v", name, err)
+			continue
+		}
+		if string(got) != want {
+			t.Errorf("restored %q = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestStageDurableRawDisks(t *testing.T) {
+	t.Setenv(durableBackendEnvVar, durableBackendRawDisk)
+
+	s := &AteomService{}
+	actorUID := "test-actor-raw-dur"
+	containers := []*ateompb.Container{
+		{
+			Name: "agent",
+			DurableDirVolumeMounts: []*ateompb.DurableDirVolumeMount{
+				{VolumeName: "workspace", MountPath: "/workspace"},
+			},
+		},
+	}
+
+	tmpDir := t.TempDir()
+	vols, err := s.stageDurableVolumesAt(t.Context(), tmpDir, actorUID, containers)
+	if err != nil {
+		t.Fatalf("stageDurableVolumesAt: %v", err)
+	}
+
+	if len(vols) != 1 {
+		t.Fatalf("expected 1 BlockVolume, got %d", len(vols))
+	}
+	bv := vols[0]
+	if bv.Name != "workspace" {
+		t.Errorf("Name = %q, want %q", bv.Name, "workspace")
+	}
+	if bv.MountPath != "/workspace" {
+		t.Errorf("MountPath = %q, want %q", bv.MountPath, "/workspace")
+	}
+	if bv.DeviceName != "/dev/vdb" {
+		t.Errorf("DeviceName = %q, want %q", bv.DeviceName, "/dev/vdb")
+	}
+	if bv.Fstype != "ext4" {
+		t.Errorf("Fstype = %q, want %q", bv.Fstype, "ext4")
+	}
+	if !slicesContains(bv.Options, "discard") {
+		t.Errorf("Options %v does not contain discard", bv.Options)
+	}
+
+	// Verify disk file was created on host.
+	if st, err := os.Stat(bv.HostPath); err != nil || st.Size() == 0 {
+		t.Errorf("expected non-empty virtual disk at %q, err: %v", bv.HostPath, err)
+	}
+}
+
+func slicesContains(ss []string, target string) bool {
+	for _, s := range ss {
+		if s == target {
+			return true
+		}
+	}
+	return false
+}

@@ -37,10 +37,23 @@ const (
 	ShareVolumes    = "volumes"
 )
 
+// BlockVolume describes an external raw block device directly attached to the microVM
+// (e.g. Hyperdisk or local SSD via virtio-blk).
+type BlockVolume struct {
+	Name       string   `json:"name,omitempty"`
+	HostPath   string   `json:"host_path"`             // Host device path or virtual disk image, e.g. /dev/disk/by-id/... or /path/to/actor.raw
+	MountPath  string   `json:"mount_path"`            // Guest container mount point, e.g. /mnt/disks/hyperdisk
+	DeviceName string   `json:"device_name,omitempty"` // Guest block device name, e.g. /dev/vdb
+	Fstype     string   `json:"fstype,omitempty"`      // Filesystem type, e.g. "ext4" (default: "ext4")
+	Readonly   bool     `json:"readonly,omitempty"`
+	Options    []string `json:"options,omitempty"` // Mount options inside guest, e.g. "discard", "noatime"
+}
+
 // MicroVMOptions describes the micro-VM context of one actor container.
 type MicroVMOptions struct {
-	ActorUID    string
-	ContainerID string
+	ActorUID     string
+	ContainerID  string
+	BlockVolumes []BlockVolume
 }
 
 // ShapeMicroVM replaces host system mounts with guest mounts, repoints volume
@@ -52,6 +65,11 @@ func ShapeMicroVM(spec *specs.Spec, o MicroVMOptions) error {
 	volumes := make([]specs.Mount, 0, len(spec.Mounts))
 	for _, m := range spec.Mounts {
 		if m.Type != "bind" {
+			continue
+		}
+		if isBlockVolumeMount(m, o) {
+			// Direct block volumes bypass the virtio-fs GuestSharedDir/csi rewrite.
+			// kata-agent mounts block storages directly inside the guest via agentpb.Storage.
 			continue
 		}
 		src, err := guestVolumeSource(m.Source, o.ActorUID, o.ContainerID)
@@ -109,6 +127,9 @@ func mergeKataResources(from *specs.LinuxResources) *specs.LinuxResources {
 
 // guestVolumeSource maps a volume's host directory to its guest path.
 func guestVolumeSource(hostPath, actorUID, containerID string) (string, error) {
+	if strings.HasPrefix(hostPath, "/dev/") {
+		return hostPath, nil
+	}
 	for _, staged := range []struct{ host, guest string }{
 		{ateompath.DurableDirVolumeMountsDir(actorUID), path.Join(GuestSharedDir, ShareDurable)},
 		{ateompath.VolumesDir(actorUID), path.Join(GuestSharedDir, ShareCSI)},
@@ -120,6 +141,21 @@ func guestVolumeSource(hostPath, actorUID, containerID string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("host path %q is not staged into the guest share", hostPath)
+}
+
+// isBlockVolumeMount reports whether a mount represents a direct-attached block volume.
+func isBlockVolumeMount(m specs.Mount, o MicroVMOptions) bool {
+	if strings.HasPrefix(m.Source, "/dev/") {
+		return true
+	}
+	for _, bv := range o.BlockVolumes {
+		if (bv.MountPath != "" && bv.MountPath == m.Destination) ||
+			(bv.HostPath != "" && bv.HostPath == m.Source) ||
+			(bv.Name != "" && strings.Contains(m.Source, "/"+bv.Name)) {
+			return true
+		}
+	}
+	return false
 }
 
 // guestSystemMounts returns the standard kata guest mount set.

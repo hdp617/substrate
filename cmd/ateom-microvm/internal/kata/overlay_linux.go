@@ -393,11 +393,66 @@ func (a *AgentClient) CreateSandboxForActor(ctx context.Context, opts CreateSand
 	})
 }
 
+// BlockStorage constructs an agentpb.Storage for direct block attachment (virtio-blk).
+func BlockStorage(source, mountPoint, fstype string) *agentpb.Storage {
+	if fstype == "" {
+		fstype = "ext4"
+	}
+	return &agentpb.Storage{
+		Driver:     "blk",
+		Source:     source,
+		Fstype:     fstype,
+		MountPoint: mountPoint,
+	}
+}
+
+// BlockStorages converts a list of BlockVolume specifications into agentpb.Storage messages.
+func BlockStorages(vols []ocispec.BlockVolume) []*agentpb.Storage {
+	if len(vols) == 0 {
+		return nil
+	}
+	storages := make([]*agentpb.Storage, len(vols))
+	for i, v := range vols {
+		src := v.DeviceName
+		if src == "" {
+			src = fmt.Sprintf("/dev/vd%c", 'b'+rune(i))
+		}
+		fstype := v.Fstype
+		if fstype == "" {
+			fstype = "ext4"
+		}
+		opts := make([]string, len(v.Options))
+		copy(opts, v.Options)
+		if !v.Readonly && !hasDiscardOption(opts) {
+			opts = append(opts, "discard")
+		}
+		storages[i] = &agentpb.Storage{
+			Driver:     "blk",
+			Source:     src,
+			Fstype:     fstype,
+			Options:    opts,
+			MountPoint: v.MountPath,
+		}
+	}
+	return storages
+}
+
+func hasDiscardOption(opts []string) bool {
+	for _, o := range opts {
+		if o == "discard" {
+			return true
+		}
+	}
+	return false
+}
+
 // StartRootfsContainer creates + starts one container on the shared merged rootfs —
 // the stock kata flow: the agent's setup_bundle binds shared/<cid>/rootfs to
-// /run/kata-containers/<cid>/rootfs and the container runs there. Writable: the
-// host-side overlay upper receives the writes (the guest mounts no overlay itself).
-func (a *AgentClient) StartRootfsContainer(ctx context.Context, cid string, spec *specs.Spec) error {
+// /run/kata-containers/<cid>/rootfs and the container runs there. Optional block
+// storages (virtio-blk direct attached disks) are passed through to the agent
+// in CreateContainerRequest. Writable: the host-side overlay upper receives the
+// writes (the guest mounts no overlay itself).
+func (a *AgentClient) StartRootfsContainer(ctx context.Context, cid string, spec *specs.Spec, storages ...*agentpb.Storage) error {
 	pbSpec := SpecToAgentPB(spec)
 	pbSpec.Root = &agentpb.Root{Path: GuestSharedRootfs(cid), Readonly: false}
 	// Per-container cgroup under the shared /ateomchv parent, so the guest
@@ -409,6 +464,7 @@ func (a *AgentClient) StartRootfsContainer(ctx context.Context, cid string, spec
 		ContainerId: cid,
 		ExecId:      cid,
 		OCI:         pbSpec,
+		Storages:    storages,
 	}); err != nil {
 		return fmt.Errorf("creating rootfs container %q: %w", cid, err)
 	}

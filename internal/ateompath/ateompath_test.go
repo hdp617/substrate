@@ -94,3 +94,22 @@ func TestActorPathUsesUID(t *testing.T) {
 		t.Errorf("ActorPath(%q) = %q, want suffix %q", uid1, path1, want)
 	}
 }
+
+func TestDurableDirSnapshotFile(t *testing.T) {
+	for name, want := range map[string]bool{
+		DurableDirTarFile:    true,
+		"workspace.raw":      true,
+		"data.raw":           true,
+		"config.json":        false,
+		"state.json":         false,
+		"memory-ranges":      false,
+		"base-id":            false,
+		"rootfs-upper.tar":   false,
+		"manifest.json":      false,
+		"workspace.raw.zstd": false,
+	} {
+		if got := DurableDirSnapshotFile(name); got != want {
+			t.Errorf("DurableDirSnapshotFile(%q) = %v, want %v", name, got, want)
+		}
+	}
+}

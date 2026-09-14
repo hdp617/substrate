@@ -172,6 +172,19 @@ func workloadIDs(ctrs []actorContainer) []string {
 	return ids
 }
 
+// BlockVolume aliases ocispec.BlockVolume for direct block attachment (virtio-blk).
+type BlockVolume = ocispec.BlockVolume
+
+// SetBlockVolumes configures direct block attachment volumes for micro-VMs.
+func (s *AteomService) SetBlockVolumes(vols []BlockVolume) {
+	s.blockVolumes = vols
+}
+
+// BlockVolumes returns the direct block attachment volumes configured for micro-VMs.
+func (s *AteomService) BlockVolumes() []BlockVolume {
+	return s.blockVolumes
+}
+
 // actorContainer is one of the actor's containers prepared for the shared micro-VM:
 // its name (also the kata containerID + the merged rootfs's find-paths subdir), the
 // host OCI bundle rootfs that backs the overlay lower, and its OCI spec. The writable
@@ -183,6 +196,8 @@ type actorContainer struct {
 	spec *specs.Spec
 	// imageMounts are the image volumes this container mounts, and where.
 	imageMounts []*ateompb.ImageVolumeMount
+	// blockVolumes are the direct-attached block devices mounted into this container.
+	blockVolumes []BlockVolume
 }
 
 // resolvedRuntime holds the concrete binary/config paths for a request, taken
@@ -294,6 +309,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		assetPaths:       req.GetRuntimeAssetPaths(),
 		egressGateway:    req.GetEgressGateway(),
 		size:             sizing.FromLimits(req.GetCpuMilli(), req.GetMemoryBytes()),
+		blockVolumes:     s.blockVolumes,
 	}
 
 	attribution := p.actorAttribution()
@@ -337,6 +353,8 @@ type actorBootParams struct {
 	// memory); a container's own cgroup limit comes from its declared resources.
 	// Zero fields keep the kata defaults.
 	size sizing.SandboxSize
+	// blockVolumes are the direct-attached raw block devices injected into Cloud Hypervisor.
+	blockVolumes []BlockVolume
 }
 
 // actorAttribution regroups the actor fields that arrived on the Run/Restore
@@ -460,9 +478,17 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		return err
 	}
 
+	if hasDurableVolumes(containers) && isRawDiskDurableBackend() {
+		durVols, err := s.stageDurableVolumes(ctx, actorUID, containers)
+		if err != nil {
+			return fmt.Errorf("while staging durable-dir raw disks: %w", err)
+		}
+		p.blockVolumes = append(p.blockVolumes, durVols...)
+	}
+
 	// Prepare each container's OCI spec + record its bundle rootfs (the overlay
 	// lower the host merges under the container's writable upper).
-	ctrs, err := s.buildActorContainers(actorUID, containers)
+	ctrs, err := s.buildActorContainers(actorUID, containers, p.blockVolumes...)
 	if err != nil {
 		return err
 	}
@@ -531,7 +557,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	// on a failed agent dial below, so keep it here.
 	consoleLog := kata.ConsoleLogPath(actorUID)
 	vmCfg := buildVMConfig(actorUID, kernel, image, kparams, consoleLog, memMiB, vcpus,
-		agentInit(ctx, client.Info()), s.kataDebug)
+		agentInit(ctx, client.Info()), s.kataDebug, p.blockVolumes...)
 	if err := client.CreateVM(ctx, vmCfg); err != nil {
 		return fmt.Errorf("while creating VM: %w", err)
 	}
@@ -639,7 +665,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 // and records the bundle rootfs that backs the overlay's RO lower. No host disk is
 // mounted here — the merged overlays are assembled in stageMergedRootfs after the
 // sandbox state is clean. Both RunWorkload and RestoreWorkload go through here.
-func (s *AteomService) buildActorContainers(actorUID string, containers []*ateompb.Container) ([]actorContainer, error) {
+func (s *AteomService) buildActorContainers(actorUID string, containers []*ateompb.Container, blockVols ...BlockVolume) ([]actorContainer, error) {
 	ctrs := make([]actorContainer, len(containers))
 	for i, c := range containers {
 		cn := c.GetName()
@@ -648,7 +674,11 @@ func (s *AteomService) buildActorContainers(actorUID string, containers []*ateom
 		if err != nil {
 			return nil, fmt.Errorf("while reading the OCI spec for %q: %w", cn, err)
 		}
-		if err := ocispec.ShapeMicroVM(spec, ocispec.MicroVMOptions{ActorUID: actorUID, ContainerID: cn}); err != nil {
+		if err := ocispec.ShapeMicroVM(spec, ocispec.MicroVMOptions{
+			ActorUID:     actorUID,
+			ContainerID:  cn,
+			BlockVolumes: blockVols,
+		}); err != nil {
 			return nil, fmt.Errorf("while shaping the OCI spec for %q: %w", cn, err)
 		}
 		// Compose the bundle rootfs from the node's cached image layers (an
@@ -673,6 +703,7 @@ func (s *AteomService) buildActorContainers(actorUID string, containers []*ateom
 			bundleRootfs: bundleRootfs,
 			spec:         spec,
 			imageMounts:  c.GetImageVolumeMounts(),
+			blockVolumes: blockVols,
 		}
 	}
 	return ctrs, nil
@@ -701,8 +732,8 @@ func (s *AteomService) stageMergedRootfs(ctx context.Context, rr resolvedRuntime
 			}
 		}
 	}
-	if hasDurableVolumes(containers) {
-		if err := s.stageDurableVolumes(ctx, id); err != nil {
+	if hasDurableVolumes(containers) && !isRawDiskDurableBackend() {
+		if _, err := s.stageDurableVolumes(ctx, id, containers); err != nil {
 			return nil, fmt.Errorf("while staging durable-dir volumes: %w", err)
 		}
 	}
@@ -828,7 +859,7 @@ func initParams(agentInit bool) string {
 // the earliest messages: hvc0 only exists once virtio-console probes, so the memory
 // map, CPU features and ACPI lines never reach the log. kataDebug adds the UART back
 // with earlycon (and pays the ~800ms) for diagnosing a guest that dies before then.
-func buildVMConfig(id, kernel, image, kparams, consoleLog string, memMiB, vcpus int, agentInit, debug bool) ch.VmConfig {
+func buildVMConfig(id, kernel, image, kparams, consoleLog string, memMiB, vcpus int, agentInit, debug bool, blockVols ...BlockVolume) ch.VmConfig {
 	cmdline := "root=/dev/vda1 rootflags=data=ordered,errors=remount-ro ro rootfstype=ext4 " +
 		"panic=1 no_timer_check noreplace-smp console=hvc0 " +
 		initParams(agentInit)
@@ -840,13 +871,24 @@ func buildVMConfig(id, kernel, image, kparams, consoleLog string, memMiB, vcpus 
 		cmdline += " " + earlyconParam()
 		serial = &ch.ConsoleConfig{Mode: "File", File: kata.SerialLogPath(id)}
 	}
+	disks := []ch.DiskConfig{
+		{Path: image, Readonly: true, ImageType: "Raw", NumQueues: int32(vcpus), QueueSize: 1024},
+	}
+	for _, bv := range blockVols {
+		disks = append(disks, ch.DiskConfig{
+			Path:      bv.HostPath,
+			Readonly:  bv.Readonly,
+			Direct:    true,
+			NumQueues: int32(vcpus),
+			QueueSize: 1024,
+			ImageType: "Raw",
+		})
+	}
 	return ch.VmConfig{
-		Cpus:    ch.CpusConfig{BootVcpus: int32(vcpus), MaxVcpus: int32(vcpus)},
-		Memory:  ch.MemoryConfig{Size: int64(memMiB) * 1024 * 1024, Shared: true},
-		Payload: ch.PayloadConfig{Kernel: kernel, Cmdline: cmdline},
-		Disks: []ch.DiskConfig{
-			{Path: image, Readonly: true, ImageType: "Raw", NumQueues: int32(vcpus), QueueSize: 1024},
-		},
+		Cpus:     ch.CpusConfig{BootVcpus: int32(vcpus), MaxVcpus: int32(vcpus)},
+		Memory:   ch.MemoryConfig{Size: int64(memMiB) * 1024 * 1024, Shared: true},
+		Payload:  ch.PayloadConfig{Kernel: kernel, Cmdline: cmdline},
+		Disks:    disks,
 		Fs:       buildFsConfigs(id),
 		Platform: &ch.PlatformConfig{NumPciSegments: 2},
 		Rng:      &ch.RngConfig{Src: "/dev/urandom"},
@@ -929,7 +971,8 @@ func (s *AteomService) startActorContainers(ctx context.Context, ac *kata.AgentC
 // Its spec binds every declared volume at its mount path.
 func startRootfsContainer(ctx context.Context, ac *kata.AgentClient, vsockPath string, c actorContainer) error {
 	cCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	err := ac.StartRootfsContainer(cCtx, c.name, c.spec)
+	storages := kata.BlockStorages(c.blockVolumes)
+	err := ac.StartRootfsContainer(cCtx, c.name, c.spec, storages...)
 	cancel()
 	if err != nil {
 		dump := kata.DebugConsoleDump(ctx, vsockPath,

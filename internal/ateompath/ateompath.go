@@ -17,6 +17,7 @@ package ateompath
 
 import (
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -197,6 +198,15 @@ func LocalSnapshotDir(actorUID, snapshotName string) string {
 // snapshot consists of this file alone, so atelet uses the name to carve the
 // durable data out of a FULL snapshot's file set.
 const DurableDirTarFile = "durable-dir.tar"
+
+// DurableDirRawSuffix is the filename suffix for raw virtual disk durable volumes.
+const DurableDirRawSuffix = ".raw"
+
+// DurableDirSnapshotFile reports whether a snapshot file holds durable-dir data,
+// either as a tar archive or as a raw virtual disk image.
+func DurableDirSnapshotFile(name string) bool {
+	return name == DurableDirTarFile || strings.HasSuffix(name, DurableDirRawSuffix)
+}
 
 // DurableDirVolumeMountsDir is the directory where individual durable-dir
 // volumes are mounted.

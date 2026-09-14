@@ -269,3 +269,65 @@ func TestWorkloadIDs(t *testing.T) {
 		t.Errorf("workloadIDs() = %v, want %v", got, want)
 	}
 }
+
+func TestBuildVMConfigBlockVolumes(t *testing.T) {
+	const id = "actor-1"
+	consoleLog := kata.ConsoleLogPath(id)
+	vcpus := 4
+	memMiB := 512
+
+	// Without block volumes: only root disk
+	cfgNoVols := buildVMConfig(id, "/vmlinux", "/rootfs.img", "", consoleLog, memMiB, vcpus, true, false)
+	if len(cfgNoVols.Disks) != 1 {
+		t.Fatalf("Disks = %d, want 1", len(cfgNoVols.Disks))
+	}
+	if cfgNoVols.Disks[0].Path != "/rootfs.img" || !cfgNoVols.Disks[0].Readonly {
+		t.Errorf("Disks[0] = %+v, want /rootfs.img readonly", cfgNoVols.Disks[0])
+	}
+
+	// With direct block volumes
+	vols := []BlockVolume{
+		{
+			HostPath:  "/dev/disk/by-id/google-hyperdisk-1",
+			MountPath: "/mnt/disks/hyperdisk1",
+			Readonly:  false,
+		},
+		{
+			HostPath:  "/dev/disk/by-id/google-hyperdisk-2",
+			MountPath: "/mnt/disks/hyperdisk2",
+			Readonly:  true,
+		},
+	}
+	cfg := buildVMConfig(id, "/vmlinux", "/rootfs.img", "", consoleLog, memMiB, vcpus, true, false, vols...)
+	if len(cfg.Disks) != 3 {
+		t.Fatalf("Disks count = %d, want 3", len(cfg.Disks))
+	}
+
+	// Root disk invariant
+	if cfg.Disks[0].Path != "/rootfs.img" || !cfg.Disks[0].Readonly || cfg.Disks[0].ImageType != "Raw" {
+		t.Errorf("root disk = %+v", cfg.Disks[0])
+	}
+
+	// Secondary block disks
+	for i, bv := range vols {
+		disk := cfg.Disks[i+1]
+		if disk.Path != bv.HostPath {
+			t.Errorf("disk[%d].Path = %q, want %q", i+1, disk.Path, bv.HostPath)
+		}
+		if disk.Readonly != bv.Readonly {
+			t.Errorf("disk[%d].Readonly = %v, want %v", i+1, disk.Readonly, bv.Readonly)
+		}
+		if !disk.Direct {
+			t.Errorf("disk[%d].Direct = %v, want true", i+1, disk.Direct)
+		}
+		if disk.NumQueues != int32(vcpus) {
+			t.Errorf("disk[%d].NumQueues = %d, want %d", i+1, disk.NumQueues, vcpus)
+		}
+		if disk.QueueSize != 1024 {
+			t.Errorf("disk[%d].QueueSize = %d, want 1024", i+1, disk.QueueSize)
+		}
+		if disk.ImageType != "Raw" {
+			t.Errorf("disk[%d].ImageType = %q, want Raw", i+1, disk.ImageType)
+		}
+	}
+}

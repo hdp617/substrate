@@ -106,6 +106,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		assetPaths:       req.GetRuntimeAssetPaths(),
 		egressGateway:    req.GetEgressGateway(),
 		size:             sizing.FromLimits(req.GetCpuMilli(), req.GetMemoryBytes()),
+		blockVolumes:     s.blockVolumes,
 	}
 	restoreDir := ateompath.RestoreStateDir(p.actorUID)
 	durableDir := ateompath.DurableDirVolumeMountsDir(p.actorUID)
@@ -130,7 +131,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	// cold-starts. The snapshot must carry them — the actor declares the volume, and
 	// every scope captures it.
 	if hasDurableVolumes(p.containers) {
-		if err := untarDurableVolumes(durableDir, restoreDir); err != nil {
+		if err := restoreDurableVolumes(durableDir, restoreDir); err != nil {
 			return nil, err
 		}
 	}
@@ -236,7 +237,7 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	if len(containers) > maxActorContainers {
 		return status.Errorf(codes.Unimplemented, "ateom-microvm supports at most %d containers, got %d", maxActorContainers, len(containers))
 	}
-	ctrs, err := s.buildActorContainers(actorUID, containers)
+	ctrs, err := s.buildActorContainers(actorUID, containers, p.blockVolumes...)
 	if err != nil {
 		return err
 	}

@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -42,6 +43,9 @@ func hasCsiVolumes(containers []*ateompb.Container) bool {
 func (s *AteomService) stageCsiVolumes(ctx context.Context, actorUID string) error {
 	src := ateompath.VolumesDir(actorUID)
 	if _, err := os.Stat(src); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return fmt.Errorf("while checking CSI volumes dir %q: %w", src, err)
 	}
 	if err := kata.BindIntoShare(ctx, src, actorUID, ocispec.ShareCSI); err != nil {

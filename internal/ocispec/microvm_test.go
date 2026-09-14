@@ -152,3 +152,52 @@ func TestShapeMicroVM_LeavesUndeclaredContainerUnlimited(t *testing.T) {
 		t.Errorf("cpu quota = %d, want unset for a container that declared none", *c.Quota)
 	}
 }
+
+// Block volumes bypass the GuestSharedDir/csi path rewrite: kata-agent mounts
+// them directly as virtio-blk devices inside the guest.
+func TestShapeMicroVM_BlockVolumeBypassesShareRewrite(t *testing.T) {
+	spec := Build(Options{ActorUID: testActorUID, ContainerName: "app", Args: []string{"/app"}})
+	spec.Mounts = append(spec.Mounts,
+		specs.Mount{
+			Destination: "/mnt/block-direct",
+			Type:        "bind",
+			Source:      "/dev/disk/by-id/google-hyperdisk-0",
+		},
+		specs.Mount{
+			Destination: "/mnt/block-declared",
+			Type:        "bind",
+			Source:      "/run/ate/actors/" + testActorUID + "/volumes/custom-blk",
+		},
+	)
+
+	opts := MicroVMOptions{
+		ActorUID:    testActorUID,
+		ContainerID: "app",
+		BlockVolumes: []BlockVolume{
+			{
+				Name:      "custom-blk",
+				HostPath:  "/run/ate/actors/" + testActorUID + "/volumes/custom-blk",
+				MountPath: "/mnt/block-declared",
+			},
+		},
+	}
+
+	if err := ShapeMicroVM(spec, opts); err != nil {
+		t.Fatalf("ShapeMicroVM() = %v, want success bypassing block volume rewrites", err)
+	}
+
+	for _, m := range spec.Mounts {
+		if m.Destination == "/mnt/block-direct" || m.Destination == "/mnt/block-declared" {
+			t.Errorf("found %q in spec.Mounts; block volume should bypass virtio-fs mounts", m.Destination)
+		}
+	}
+
+	// guestVolumeSource directly called with /dev/ path returns it without error.
+	got, err := guestVolumeSource("/dev/disk/by-id/google-hyperdisk-0", testActorUID, "app")
+	if err != nil {
+		t.Fatalf("guestVolumeSource(/dev/...) error = %v, want nil", err)
+	}
+	if got != "/dev/disk/by-id/google-hyperdisk-0" {
+		t.Errorf("guestVolumeSource(/dev/...) = %q, want path unmodified", got)
+	}
+}

@@ -22,6 +22,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/agent-substrate/substrate/internal/ocispec"
 )
 
 // The container rootfs is untrusted (the image below, the guest's own snapshot
@@ -93,5 +95,55 @@ func TestVirtiofsdArgs(t *testing.T) {
 	// the flag must never be emitted.
 	if slices.Contains(args, "--xattr") {
 		t.Errorf("args %v contain --xattr; the guest has no overlay to feed it to", args)
+	}
+}
+
+func TestBlockStorage(t *testing.T) {
+	st := BlockStorage("/dev/vdb", "/mnt/data", "ext4")
+	if st.Driver != "blk" {
+		t.Errorf("Driver = %q, want blk", st.Driver)
+	}
+	if st.Source != "/dev/vdb" {
+		t.Errorf("Source = %q, want /dev/vdb", st.Source)
+	}
+	if st.MountPoint != "/mnt/data" {
+		t.Errorf("MountPoint = %q, want /mnt/data", st.MountPoint)
+	}
+	if st.Fstype != "ext4" {
+		t.Errorf("Fstype = %q, want ext4", st.Fstype)
+	}
+
+	stDef := BlockStorage("/dev/vdc", "/mnt/data2", "")
+	if stDef.Fstype != "ext4" {
+		t.Errorf("default Fstype = %q, want ext4", stDef.Fstype)
+	}
+}
+
+func TestBlockStorages(t *testing.T) {
+	vols := []ocispec.BlockVolume{
+		{
+			HostPath:   "/dev/disk/by-id/google-vol-1",
+			MountPath:  "/mnt/vol1",
+			DeviceName: "/dev/vdb",
+			Fstype:     "ext4",
+		},
+		{
+			HostPath:  "/dev/disk/by-id/google-vol-2",
+			MountPath: "/mnt/vol2",
+		},
+	}
+	storages := BlockStorages(vols)
+	if len(storages) != 2 {
+		t.Fatalf("len(storages) = %d, want 2", len(storages))
+	}
+	if storages[0].Source != "/dev/vdb" || storages[0].MountPoint != "/mnt/vol1" || storages[0].Driver != "blk" || storages[0].Fstype != "ext4" {
+		t.Errorf("storages[0] = %+v", storages[0])
+	}
+	if storages[1].Source != "/dev/vdc" || storages[1].MountPoint != "/mnt/vol2" || storages[1].Driver != "blk" || storages[1].Fstype != "ext4" {
+		t.Errorf("storages[1] = %+v, want source /dev/vdc and fstype ext4", storages[1])
+	}
+
+	if empty := BlockStorages(nil); empty != nil {
+		t.Errorf("BlockStorages(nil) = %v, want nil", empty)
 	}
 }

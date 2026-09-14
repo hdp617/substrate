@@ -46,6 +46,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/atunnel"
+	"github.com/agent-substrate/substrate/internal/ocispec"
 	"github.com/agent-substrate/substrate/internal/otlprelay"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"github.com/agent-substrate/substrate/internal/resources"
@@ -413,6 +414,9 @@ type AteomService struct {
 	chBinary   string
 	kataConfig string
 	kataDebug  bool
+
+	// blockVolumes holds direct block attachment specifications (virtio-blk).
+	blockVolumes []ocispec.BlockVolume
 
 	// memReserveMiB is guest RAM (MiB) held back from the pod's memory limit for
 	// the cloud-hypervisor VMM + virtiofsd (host processes sharing the pod cgroup
