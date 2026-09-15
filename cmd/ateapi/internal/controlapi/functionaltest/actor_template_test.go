@@ -34,7 +34,7 @@ func TestActorTemplateCRUD(t *testing.T) {
 	created, err := tc.client.CreateActorTemplate(ctx, &ateapipb.CreateActorTemplateRequest{
 		ActorTemplate: &ateapipb.ActorTemplate{
 			Metadata:        &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "tmpl-a"},
-			Containers:      []*ateapipb.Container{{Name: "main", Image: "example.com/app:v1"}},
+			Containers:      []*ateapipb.Container{{Name: "main", Image: "example.com/app:v1@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}},
 			SnapshotsConfig: &ateapipb.SnapshotsConfig{StorageLocation: "gs://my-bucket/snapshots"},
 			SandboxConfig: &ateapipb.SandboxConfig{
 				SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR,
@@ -53,9 +53,14 @@ func TestActorTemplateCRUD(t *testing.T) {
 		t.Fatalf("CreateActorTemplate failed: %v", err)
 	}
 	want := &ateapipb.ActorTemplate{
-		Metadata:        &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "tmpl-a", Version: 1},
-		Containers:      []*ateapipb.Container{{Name: "main", Image: "example.com/app:v1"}},
-		SnapshotsConfig: &ateapipb.SnapshotsConfig{StorageLocation: "gs://my-bucket/snapshots"},
+		Metadata:   &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "tmpl-a", Version: 1},
+		Containers: []*ateapipb.Container{{Name: "main", Image: "example.com/app:v1@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}},
+		SnapshotsConfig: &ateapipb.SnapshotsConfig{
+			StorageLocation: "gs://my-bucket/snapshots",
+			OnPause:         ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+			OnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+			OnResume:        &ateapipb.OnResumeConfig{FromData: ateapipb.ResumeSource_RESUME_SOURCE_COLD_BOOT},
+		},
 		SandboxConfig: &ateapipb.SandboxConfig{
 			SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR,
 			ConfigName:   "gvisor-default",
@@ -70,7 +75,7 @@ func TestActorTemplateCRUD(t *testing.T) {
 	_, err = tc.client.CreateActorTemplate(ctx, &ateapipb.CreateActorTemplateRequest{
 		ActorTemplate: &ateapipb.ActorTemplate{
 			Metadata:        &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "tmpl-a"},
-			Containers:      []*ateapipb.Container{{Name: "main", Image: "example.com/app:v1"}},
+			Containers:      []*ateapipb.Container{{Name: "main", Image: "example.com/app:v1@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}},
 			SnapshotsConfig: &ateapipb.SnapshotsConfig{StorageLocation: "gs://my-bucket/snapshots"},
 			SandboxConfig:   &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, ConfigName: "gvisor-default"},
 		},
@@ -126,10 +131,20 @@ func TestActorTemplateCRUD(t *testing.T) {
 	_, err = tc.client.CreateActorTemplate(ctx, &ateapipb.CreateActorTemplateRequest{
 		ActorTemplate: &ateapipb.ActorTemplate{
 			Metadata:        &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "tmpl-unnamed-config"},
-			Containers:      []*ateapipb.Container{{Name: "main", Image: "example.com/app:v1"}},
+			Containers:      []*ateapipb.Container{{Name: "main", Image: "example.com/app:v1@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}},
 			SnapshotsConfig: &ateapipb.SnapshotsConfig{StorageLocation: "gs://my-bucket/snapshots"},
 			SandboxConfig:   &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR},
 		},
 	})
 	assertGrpcErrorRegex(t, err, codes.InvalidArgument, `sandbox_config\.config_name`)
+}
+
+func TestListActorTemplates_InvalidPageToken(t *testing.T) {
+	ns := namespaceForTest("ns-template-invalid-token")
+	tc := setupTest(t, ns)
+	defer tc.cleanup()
+
+	_, err := tc.client.ListActorTemplates(context.Background(),
+		&ateapipb.ListActorTemplatesRequest{PageToken: "%%%"})
+	assertGrpcError(t, err, codes.InvalidArgument, "invalid page_token")
 }

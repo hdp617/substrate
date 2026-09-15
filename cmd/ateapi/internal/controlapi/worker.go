@@ -128,6 +128,7 @@ func (s *RPCService) CreateWorker(ctx context.Context, req *ateapipb.CreateWorke
 	if inWorker != nil { // otherwise validation will flag it
 		scrubResourceMetadataForCreate(inWorker.Metadata)
 		inWorker.Status = nil
+		defaultWorker(inWorker)
 	}
 
 	// Validate the request, including the object within it.
@@ -173,10 +174,10 @@ func validateCreateWorkerRequest(ctx context.Context, req *ateapipb.CreateWorker
 }
 
 // UpdateWorker replaces the stored Worker with the one the request carries.
-// Only sandbox_class and labels are the caller's to change; a request that
-// alters an immutable field — including by leaving it unset, which would clear
-// it — is rejected. The service layer enforces that with declarative
-// validation against the stored worker inside the update transaction.
+// Only labels are the caller's to change; a request that alters an immutable
+// field — including by leaving it unset, which would clear it — is rejected.
+// The service layer enforces that with declarative validation against the
+// stored worker inside the update transaction.
 func (s *RPCService) UpdateWorker(ctx context.Context, req *ateapipb.UpdateWorkerRequest) (*ateapipb.Worker, error) {
 	// First scrub any fields that callers are not allowed to set.
 	inWorker := req.Worker
@@ -199,6 +200,9 @@ func (s *RPCService) UpdateWorker(ctx context.Context, req *ateapipb.UpdateWorke
 		// Restore status and metadata from the server.
 		toUpdate.Status = status
 		toUpdate.Metadata = metadata
+		// Defaults are re-applied to the merged object, so a defaulted field
+		// the request left unset is defaulted again rather than cleared.
+		defaultWorker(toUpdate)
 		return nil
 	})
 }

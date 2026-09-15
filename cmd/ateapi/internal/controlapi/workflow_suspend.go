@@ -160,6 +160,7 @@ func (w *ActorWorkflow) ensureMarkedSuspending(ctx context.Context, actorRef res
 		}
 		return nil, err
 	}
+	logActorStateChanged(ctx, storedActor, ateattr.OperationSuspend)
 	return storedActor, nil
 }
 
@@ -172,7 +173,7 @@ func commitSnapshotScope(atespace string, tmpl *ateapipb.ActorTemplate) ateapipb
 	if atespace == resources.GoldenActorAtespace {
 		return ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL
 	}
-	return effectiveContentScope(tmpl.GetSnapshotsConfig().GetOnCommit())
+	return tmpl.GetSnapshotsConfig().GetOnCommit()
 }
 
 // pausedContentScope returns the scope a paused actor's local snapshot was
@@ -183,7 +184,7 @@ func pausedContentScope(local *ateapipb.LocalSnapshotInfo, tmpl *ateapipb.ActorT
 	if scope := local.GetContentScope(); scope != ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED {
 		return scope
 	}
-	return effectiveContentScope(tmpl.GetSnapshotsConfig().GetOnPause())
+	return tmpl.GetSnapshotsConfig().GetOnPause()
 }
 
 // isPausedOriginSuspend reports whether the suspend must upload a PAUSED
@@ -442,6 +443,7 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 		}
 		return nil, err
 	}
+	logActorStateChanged(ctx, storedActor, ateattr.OperationSuspend)
 	return storedActor, nil
 }
 

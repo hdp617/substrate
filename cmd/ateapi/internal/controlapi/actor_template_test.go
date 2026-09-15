@@ -36,13 +36,20 @@ import (
 )
 
 // validActorTemplate returns the smallest template that passes create
-// validation; mutations tweak it per test case.
+// validation; mutations tweak it per test case. The snapshot scopes and
+// resume policy are set explicitly because TestValidateActorTemplate
+// exercises validation directly, without defaulting.
 func validActorTemplate(mutations ...func(*ateapipb.ActorTemplate)) *ateapipb.ActorTemplate {
 	template := &ateapipb.ActorTemplate{
-		Metadata:        &ateapipb.ResourceMetadata{Atespace: "ns1", Name: "tmpl-a"},
-		Containers:      []*ateapipb.Container{{Name: "main", Image: "example.com/app:v1"}},
-		SnapshotsConfig: &ateapipb.SnapshotsConfig{StorageLocation: "gs://my-bucket/snapshots"},
-		SandboxConfig:   &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, ConfigName: "gvisor-default"},
+		Metadata:   &ateapipb.ResourceMetadata{Atespace: "ns1", Name: "tmpl-a"},
+		Containers: []*ateapipb.Container{{Name: "main", Image: "example.com/app:v1@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}},
+		SnapshotsConfig: &ateapipb.SnapshotsConfig{
+			StorageLocation: "gs://my-bucket/snapshots",
+			OnPause:         ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+			OnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+			OnResume:        &ateapipb.OnResumeConfig{FromData: ateapipb.ResumeSource_RESUME_SOURCE_COLD_BOOT},
+		},
+		SandboxConfig: &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, ConfigName: "gvisor-default"},
 	}
 	for _, m := range mutations {
 		m(template)
@@ -169,13 +176,18 @@ func TestValidateCreateActorTemplateRequest(t *testing.T) {
 		})},
 		field.ErrorList{field.Invalid(field.NewPath("actor_template", "snapshots_config", "on_commit"), "SNAPSHOT_CONTENT_SCOPE_FULL", "")},
 	}, {
-		// UNSPECIFIED defaults to FULL, so leaving on_commit unset over a DATA
-		// on_pause is also a subset violation.
+		// Leaving on_commit unset over a DATA on_pause is both a required
+		// violation (on_commit has no default of its own) and a subset
+		// violation (UNSPECIFIED is not DATA).
 		"on_commit unset with data on_pause",
 		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
 			tmpl.SnapshotsConfig.OnPause = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
+			tmpl.SnapshotsConfig.OnCommit = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED
 		})},
-		field.ErrorList{field.Invalid(field.NewPath("actor_template", "snapshots_config", "on_commit"), "SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED", "")},
+		field.ErrorList{
+			field.Required(field.NewPath("actor_template", "snapshots_config", "on_commit"), ""),
+			field.Invalid(field.NewPath("actor_template", "snapshots_config", "on_commit"), "SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED", ""),
+		},
 	}, {
 		"missing sandbox_config",
 		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
@@ -308,8 +320,7 @@ func TestCreateActorTemplateIgnoresServerOwnedFields(t *testing.T) {
 		tmpl.Metadata.Uid = "11111111-1111-1111-1111-111111111111"
 		tmpl.Metadata.Version = 42
 		tmpl.WorkerSelector = &ateapipb.Selector{MatchLabels: map[string]string{"pool": "default"}}
-		tmpl.Containers = []*ateapipb.Container{{Name: "main", Image: "example.com/app:v1"}}
-		tmpl.SnapshotsConfig = &ateapipb.SnapshotsConfig{StorageLocation: "gs://my-bucket/snapshots"}
+		tmpl.Containers = []*ateapipb.Container{{Name: "main", Image: "example.com/app:v1@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}}
 		tmpl.Resources = &ateapipb.Resources{Limits: []*ateapipb.Limits{{Name: "memory", Quantity: "1Gi"}}}
 		// Server-owned status a client must not be able to set.
 		tmpl.Status = &ateapipb.ActorTemplateStatus{
@@ -327,7 +338,6 @@ func TestCreateActorTemplateIgnoresServerOwnedFields(t *testing.T) {
 		tmpl.Metadata.Version = 1
 		tmpl.WorkerSelector = in.GetWorkerSelector()
 		tmpl.Containers = in.GetContainers()
-		tmpl.SnapshotsConfig = in.GetSnapshotsConfig()
 		tmpl.Resources = in.GetResources()
 		tmpl.Status = &ateapipb.ActorTemplateStatus{}
 	})
@@ -503,10 +513,14 @@ func TestValidateActorTemplate(t *testing.T) {
 		mutate: func(tmpl *ateapipb.ActorTemplate) { tmpl.SnapshotsConfig.StorageLocation = "" },
 		want:   field.ErrorList{field.Required(field.NewPath("snapshots_config", "storage_location"), "")},
 	}, {
-		name: "unspecified snapshot scopes are allowed",
+		name: "unspecified snapshot scopes",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
 			tmpl.SnapshotsConfig.OnPause = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED
 			tmpl.SnapshotsConfig.OnCommit = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED
+		},
+		want: field.ErrorList{
+			field.Required(field.NewPath("snapshots_config", "on_pause"), ""),
+			field.Required(field.NewPath("snapshots_config", "on_commit"), ""),
 		},
 	}, {
 		name: "on_commit outside the enum",
@@ -520,6 +534,16 @@ func TestValidateActorTemplate(t *testing.T) {
 			tmpl.SnapshotsConfig.OnPause = ateapipb.SnapshotContentScope(-1)
 		},
 		want: field.ErrorList{field.Invalid(field.NewPath("snapshots_config", "on_pause"), nil, "").WithOrigin("minimum")},
+	}, {
+		name:   "missing on_resume",
+		mutate: func(tmpl *ateapipb.ActorTemplate) { tmpl.SnapshotsConfig.OnResume = nil },
+		want:   field.ErrorList{field.Required(field.NewPath("snapshots_config", "on_resume"), "")},
+	}, {
+		name: "unspecified on_resume from_data",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.SnapshotsConfig.OnResume = &ateapipb.OnResumeConfig{}
+		},
+		want: field.ErrorList{field.Required(field.NewPath("snapshots_config", "on_resume", "from_data"), "")},
 	}, {
 		name: "valid on_resume",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
@@ -550,14 +574,14 @@ func TestValidateActorTemplate(t *testing.T) {
 		name: "too many containers",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
 			for i := 0; i < 10; i++ {
-				tmpl.Containers = append(tmpl.Containers, &ateapipb.Container{Name: fmt.Sprintf("c-%d", i), Image: "example.com/app:v1"})
+				tmpl.Containers = append(tmpl.Containers, &ateapipb.Container{Name: fmt.Sprintf("c-%d", i), Image: "example.com/app:v1@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"})
 			}
 		},
 		want: field.ErrorList{field.TooMany(field.NewPath("containers"), 11, 10).WithOrigin("maxItems")},
 	}, {
 		name: "duplicate container name",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
-			tmpl.Containers = append(tmpl.Containers, &ateapipb.Container{Name: "main", Image: "example.com/other:v1"})
+			tmpl.Containers = append(tmpl.Containers, &ateapipb.Container{Name: "main", Image: "example.com/other:v1@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"})
 		},
 		want: field.ErrorList{field.Duplicate(field.NewPath("containers").Index(1), nil)},
 	}, {
@@ -567,15 +591,13 @@ func TestValidateActorTemplate(t *testing.T) {
 		},
 		want: field.ErrorList{field.Duplicate(field.NewPath("containers").Index(0).Child("env").Index(1), nil)},
 	}, {
-		// One mount per volume for now; see the TODO on volume_mounts.
-		name: "same volume mounted twice is rejected",
+		name: "the same volume mounted at two paths is allowed",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
 			tmpl.Containers[0].VolumeMounts = []*ateapipb.VolumeMount{
 				{Name: "data", MountPath: "/var/data"},
 				{Name: "data", MountPath: "/mnt/data"},
 			}
 		},
-		want: field.ErrorList{field.Duplicate(field.NewPath("containers").Index(0).Child("volume_mounts").Index(1), nil)},
 	}, {
 		name: "two volumes at the same path are rejected",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
@@ -584,7 +606,7 @@ func TestValidateActorTemplate(t *testing.T) {
 				{Name: "other", MountPath: "/var/data"},
 			}
 		},
-		want: field.ErrorList{field.Duplicate(field.NewPath("containers").Index(0).Child("volume_mounts").Index(1).Child("mount_path"), nil)},
+		want: field.ErrorList{field.Duplicate(field.NewPath("containers").Index(0).Child("volume_mounts").Index(1), nil)},
 	}, {
 		name: "nested mount paths are rejected",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
@@ -631,7 +653,7 @@ func TestValidateActorTemplate(t *testing.T) {
 	}, {
 		name: "the same path in different containers is allowed",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
-			tmpl.Containers = append(tmpl.Containers, &ateapipb.Container{Name: "sidecar", Image: "example.com/side:v1"})
+			tmpl.Containers = append(tmpl.Containers, &ateapipb.Container{Name: "sidecar", Image: "example.com/side:v1@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"})
 			tmpl.Containers[0].VolumeMounts = []*ateapipb.VolumeMount{{Name: "data", MountPath: "/var/data"}}
 			tmpl.Containers[1].VolumeMounts = []*ateapipb.VolumeMount{{Name: "data", MountPath: "/var/data"}}
 		},
@@ -712,9 +734,47 @@ func TestValidateActorTemplate(t *testing.T) {
 	}, {
 		name: "image too long",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
-			tmpl.Containers[0].Image = strings.Repeat("x", 513)
+			tmpl.Containers[0].Image = strings.Repeat("x", 513) + "@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 		},
-		want: field.ErrorList{field.TooLong(field.NewPath("containers").Index(0).Child("image"), nil, 512).WithOrigin("maxLength")},
+		want: field.ErrorList{
+			field.Invalid(field.NewPath("containers").Index(0).Child("image"), nil, ""),
+			field.TooLong(field.NewPath("containers").Index(0).Child("image"), nil, 512).WithOrigin("maxLength"),
+		},
+	}, {
+		name: "invalid image: bare repository without digest",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.Containers[0].Image = "ubuntu"
+		},
+		want: field.ErrorList{field.Invalid(field.NewPath("containers").Index(0).Child("image"), nil, "")},
+	}, {
+		name: "valid image: pinned by digest",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.Containers[0].Image = "example.com/app@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+		},
+	}, {
+		name: "invalid image: uppercase repository",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.Containers[0].Image = "example.com/App:v1"
+		},
+		want: field.ErrorList{field.Invalid(field.NewPath("containers").Index(0).Child("image"), nil, "")},
+	}, {
+		name: "invalid image: malformed digest",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.Containers[0].Image = "example.com/app@sha256:abc"
+		},
+		want: field.ErrorList{field.Invalid(field.NewPath("containers").Index(0).Child("image"), nil, "")},
+	}, {
+		name: "invalid image: empty tag",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.Containers[0].Image = "example.com/app:"
+		},
+		want: field.ErrorList{field.Invalid(field.NewPath("containers").Index(0).Child("image"), nil, "")},
+	}, {
+		name: "container image missing digest",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.Containers[0].Image = "example.com/app:v1"
+		},
+		want: field.ErrorList{field.Invalid(field.NewPath("containers").Index(0).Child("image"), nil, "")},
 	}, {
 		name:   "container missing name",
 		mutate: func(tmpl *ateapipb.ActorTemplate) { tmpl.Containers[0].Name = "" },
@@ -812,10 +872,22 @@ func TestValidateActorTemplate(t *testing.T) {
 		},
 		want: field.ErrorList{field.Required(field.NewPath("containers").Index(0).Child("readyz", "http_get"), "")},
 	}, {
+		name: "missing readyz timeout_seconds",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.Containers[0].Readyz = &ateapipb.ContainerReadyz{HttpGet: &ateapipb.HTTPGetAction{Path: "/healthz", Port: 8080}}
+		},
+		want: field.ErrorList{field.Required(field.NewPath("containers").Index(0).Child("readyz", "timeout_seconds"), "")},
+	}, {
+		name: "missing readyz http_get.path",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.Containers[0].Readyz = &ateapipb.ContainerReadyz{HttpGet: &ateapipb.HTTPGetAction{Port: 8080}, TimeoutSeconds: 60}
+		},
+		want: field.ErrorList{field.Required(field.NewPath("containers").Index(0).Child("readyz", "http_get", "path"), "")},
+	}, {
 		name: "readyz timeout_seconds out of range",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
 			tmpl.Containers[0].Readyz = &ateapipb.ContainerReadyz{
-				HttpGet:        &ateapipb.HTTPGetAction{Port: 8080},
+				HttpGet:        &ateapipb.HTTPGetAction{Path: "/healthz", Port: 8080},
 				TimeoutSeconds: 3601,
 			}
 		},
@@ -824,7 +896,7 @@ func TestValidateActorTemplate(t *testing.T) {
 		name: "negative readyz timeout_seconds",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
 			tmpl.Containers[0].Readyz = &ateapipb.ContainerReadyz{
-				HttpGet:        &ateapipb.HTTPGetAction{Port: 8080},
+				HttpGet:        &ateapipb.HTTPGetAction{Path: "/healthz", Port: 8080},
 				TimeoutSeconds: -1,
 			}
 		},
@@ -832,31 +904,46 @@ func TestValidateActorTemplate(t *testing.T) {
 	}, {
 		name: "readyz missing port",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
-			tmpl.Containers[0].Readyz = &ateapipb.ContainerReadyz{HttpGet: &ateapipb.HTTPGetAction{}}
+			tmpl.Containers[0].Readyz = &ateapipb.ContainerReadyz{
+				HttpGet:        &ateapipb.HTTPGetAction{Path: "/healthz"},
+				TimeoutSeconds: 60,
+			}
 		},
 		want: field.ErrorList{field.Required(field.NewPath("containers").Index(0).Child("readyz", "http_get", "port"), "")},
 	}, {
 		name: "negative readyz port",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
-			tmpl.Containers[0].Readyz = &ateapipb.ContainerReadyz{HttpGet: &ateapipb.HTTPGetAction{Port: -1}}
+			tmpl.Containers[0].Readyz = &ateapipb.ContainerReadyz{
+				HttpGet:        &ateapipb.HTTPGetAction{Path: "/healthz", Port: -1},
+				TimeoutSeconds: 60,
+			}
 		},
 		want: field.ErrorList{field.Invalid(field.NewPath("containers").Index(0).Child("readyz", "http_get", "port"), nil, "").WithOrigin("minimum")},
 	}, {
 		name: "readyz port out of range",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
-			tmpl.Containers[0].Readyz = &ateapipb.ContainerReadyz{HttpGet: &ateapipb.HTTPGetAction{Port: 65536}}
+			tmpl.Containers[0].Readyz = &ateapipb.ContainerReadyz{
+				HttpGet:        &ateapipb.HTTPGetAction{Path: "/healthz", Port: 65536},
+				TimeoutSeconds: 60,
+			}
 		},
 		want: field.ErrorList{field.Invalid(field.NewPath("containers").Index(0).Child("readyz", "http_get", "port"), nil, "").WithOrigin("maximum")},
 	}, {
 		name: "readyz path with query string",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
-			tmpl.Containers[0].Readyz = &ateapipb.ContainerReadyz{HttpGet: &ateapipb.HTTPGetAction{Path: "/readyz?verbose=1", Port: 8080}}
+			tmpl.Containers[0].Readyz = &ateapipb.ContainerReadyz{
+				HttpGet:        &ateapipb.HTTPGetAction{Path: "/readyz?verbose=1", Port: 8080},
+				TimeoutSeconds: 60,
+			}
 		},
 		want: field.ErrorList{field.Invalid(field.NewPath("containers").Index(0).Child("readyz", "http_get", "path"), nil, "")},
 	}, {
 		name: "readyz path not starting with slash",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
-			tmpl.Containers[0].Readyz = &ateapipb.ContainerReadyz{HttpGet: &ateapipb.HTTPGetAction{Path: "readyz", Port: 8080}}
+			tmpl.Containers[0].Readyz = &ateapipb.ContainerReadyz{
+				HttpGet:        &ateapipb.HTTPGetAction{Path: "readyz", Port: 8080},
+				TimeoutSeconds: 60,
+			}
 		},
 		want: field.ErrorList{field.Invalid(field.NewPath("containers").Index(0).Child("readyz", "http_get", "path"), nil, "")},
 	}, {
@@ -943,14 +1030,14 @@ func TestValidateActorTemplate(t *testing.T) {
 			tmpl.Volumes = []*ateapipb.Volume{{
 				Name:       "scratch",
 				DurableDir: &ateapipb.DurableDirVolumeSource{},
-				Image:      &ateapipb.ImageVolumeSource{Reference: "example.com/app@sha256:abc"},
+				Image:      &ateapipb.ImageVolumeSource{Reference: "example.com/app@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
 			}}
 		},
 		want: field.ErrorList{field.Invalid(field.NewPath("volumes").Index(0), nil, "one of").WithOrigin("union")},
 	}, {
 		name: "valid image volume",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
-			tmpl.Volumes = []*ateapipb.Volume{{Name: "tools", Image: &ateapipb.ImageVolumeSource{Reference: "example.com/app@sha256:abc"}}}
+			tmpl.Volumes = []*ateapipb.Volume{{Name: "tools", Image: &ateapipb.ImageVolumeSource{Reference: "example.com/app@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}}}
 		},
 	}, {
 		name: "image volume missing reference",
@@ -959,9 +1046,21 @@ func TestValidateActorTemplate(t *testing.T) {
 		},
 		want: field.ErrorList{field.Required(field.NewPath("volumes").Index(0).Child("image", "reference"), "")},
 	}, {
-		name: "image volume reference not pinned by digest",
+		name: "image volume reference missing digest",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
 			tmpl.Volumes = []*ateapipb.Volume{{Name: "tools", Image: &ateapipb.ImageVolumeSource{Reference: "example.com/app:v1"}}}
+		},
+		want: field.ErrorList{field.Invalid(field.NewPath("volumes").Index(0).Child("image", "reference"), nil, "")},
+	}, {
+		name: "image volume reference with malformed digest",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.Volumes = []*ateapipb.Volume{{Name: "tools", Image: &ateapipb.ImageVolumeSource{Reference: "example.com/app@sha256:abc"}}}
+		},
+		want: field.ErrorList{field.Invalid(field.NewPath("volumes").Index(0).Child("image", "reference"), nil, "")},
+	}, {
+		name: "image volume reference not a reference at all",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.Volumes = []*ateapipb.Volume{{Name: "tools", Image: &ateapipb.ImageVolumeSource{Reference: "@"}}}
 		},
 		want: field.ErrorList{field.Invalid(field.NewPath("volumes").Index(0).Child("image", "reference"), nil, "")},
 	}, {

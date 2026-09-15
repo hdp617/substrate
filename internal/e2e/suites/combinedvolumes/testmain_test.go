@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package actoridentity
+package combinedvolumes
 
 import (
+	"os"
 	"testing"
 
-	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/storetest"
+	"github.com/agent-substrate/substrate/internal/e2e"
 )
 
-func TestMain(m *testing.M) {
-	storetest.RunTests(m)
-}
+func TestMain(m *testing.M) { os.Exit(e2e.RunTestMain(m)) }

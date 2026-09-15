@@ -143,6 +143,7 @@ func (w *ActorWorkflow) ensureMarkedPausing(ctx context.Context, actorRef resour
 		}
 		return nil, err
 	}
+	logActorStateChanged(ctx, storedActor, ateattr.OperationPause)
 	return storedActor, nil
 }
 
@@ -262,7 +263,7 @@ func (w *ActorWorkflow) ensurePausedFinalized(ctx context.Context, actorRef reso
 				ateattr.ActorRefLogAttrs(actorRef)...)
 			newState = ateapipb.ActorState_ACTOR_STATE_CRASHED
 		}
-		contentScope := effectiveContentScope(actorTemplate.GetSnapshotsConfig().GetOnPause())
+		contentScope := actorTemplate.GetSnapshotsConfig().GetOnPause()
 		sandboxClass := ""
 		if worker != nil {
 			sandboxClass = worker.GetSandboxClass()
@@ -291,6 +292,9 @@ func (w *ActorWorkflow) ensurePausedFinalized(ctx context.Context, actorRef reso
 		if err == nil && storedActor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_CRASHED && !wasAlreadyCrashed {
 			logActorCrashed(ctx, latestActor, ateattr.OperationPause, ateattr.ReasonCorruptedAssignment)
 			recordActorCrash(ctx, crashAttrs)
+		}
+		if err == nil && storedActor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_PAUSED {
+			logActorStateChanged(ctx, storedActor, ateattr.OperationPause)
 		}
 		if err != nil {
 			if errors.Is(err, store.ErrVersionConflict) {

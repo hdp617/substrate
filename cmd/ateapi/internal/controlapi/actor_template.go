@@ -21,6 +21,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/distribution/reference"
+
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/volumepath"
@@ -35,11 +37,13 @@ import (
 )
 
 func (s *RPCService) CreateActorTemplate(ctx context.Context, req *ateapipb.CreateActorTemplateRequest) (*ateapipb.ActorTemplate, error) {
-	// First scrub any fields that users are not allowed to set.
+	// First scrub any fields that users are not allowed to set, then fill the
+	// defaults so validation sees the final resource state.
 	in := req.GetActorTemplate()
 	if in != nil { // otherwise validation will flag it
 		scrubResourceMetadataForCreate(in.Metadata)
 		in.Status = nil
+		defaultActorTemplate(in)
 	}
 
 	// Validate the request, including the object within it.
@@ -128,7 +132,7 @@ func (s *RPCService) ListActorTemplates(ctx context.Context, req *ateapipb.ListA
 
 	page, err := s.impl.ListActorTemplates(ctx, req.GetAtespace(), store.ListOptions{PageSize: effectivePageSize(req.GetPageSize()), PageToken: req.GetPageToken()})
 	if err != nil {
-		return nil, fmt.Errorf("while listing actor templates in db: %w", err)
+		return nil, mapListError(fmt.Errorf("while listing actor templates in db: %w", err))
 	}
 	return &ateapipb.ListActorTemplatesResponse{
 		ActorTemplates: page.Items,
@@ -269,14 +273,31 @@ func ValidateCustom_SystemInfoVolumeSource_DataSources(_ context.Context, _ oper
 	return errs
 }
 
-// ValidateCustom_ImageVolumeSource_Reference requires image references to
-// be pinned by digest, because changing the image content under a fixed
-// reference invalidates snapshots.
-func ValidateCustom_ImageVolumeSource_Reference(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *string) field.ErrorList {
-	if !strings.Contains(*value, "@") {
-		return field.ErrorList{field.Invalid(fldPath, *value, "must be pinned by digest (changing the image invalidates snapshots)")}
+// validatePinnedImage requires a well-formed OCI image reference pinned by
+// digest (e.g. "name@sha256:..."): changing the image content under a fixed
+// reference invalidates snapshots. It parses with the same grammar the
+// container runtimes use, so a malformed digest is rejected rather than
+// treated as pinned.
+func validatePinnedImage(fldPath *field.Path, value string) field.ErrorList {
+	if value == "" {
+		return nil // required is enforced by tags
+	}
+	ref, err := reference.ParseNormalizedNamed(value)
+	if err != nil {
+		return field.ErrorList{field.Invalid(fldPath, value, fmt.Sprintf("must be a well-formed image reference: %v", err))}
+	}
+	if _, ok := ref.(reference.Digested); !ok {
+		return field.ErrorList{field.Invalid(fldPath, value, "must be pinned by digest (changing the image invalidates snapshots)")}
 	}
 	return nil
+}
+
+func ValidateCustom_ImageVolumeSource_Reference(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *string) field.ErrorList {
+	return validatePinnedImage(fldPath, *value)
+}
+
+func ValidateCustom_Container_Image(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *string) field.ErrorList {
+	return validatePinnedImage(fldPath, *value)
 }
 
 func ValidateCustom_ExternalVolumeTemplate_Capacity(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *string) field.ErrorList {
@@ -331,9 +352,7 @@ func ValidateCustom_SnapshotsConfig_StorageLocation(_ context.Context, _ operati
 	return nil
 }
 
-// ValidateCustom_SnapshotsConfig requires on_commit to be a
-// subset of on_pause. UNSPECIFIED means FULL, so an unset on_commit over a
-// DATA on_pause is rejected too.
+// ValidateCustom_SnapshotsConfig requires on_commit to be a subset of on_pause.
 func ValidateCustom_SnapshotsConfig(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *ateapipb.SnapshotsConfig) field.ErrorList {
 	if value.GetOnPause() == ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA &&
 		value.GetOnCommit() != ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA {
@@ -421,19 +440,14 @@ func actorTemplateObjectRef(actor *ateapipb.Actor) *ateapipb.ObjectRef {
 	return &ateapipb.ObjectRef{Atespace: ref.GetAtespace(), Name: ref.GetName()}
 }
 
-// ValidateCustom_Container_VolumeMounts rejects two mounts at the same path
-// within one container. The list is keyed by volume name (one mount per
-// volume), so path uniqueness cannot come from the list-map key
+// ValidateCustom_Container_VolumeMounts rejects mounts that nest under one
+// another.
 func ValidateCustom_Container_VolumeMounts(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ []*ateapipb.VolumeMount) field.ErrorList {
 	var errs field.ErrorList
-	seen := make(map[string]bool, len(value))
 	for i, m := range value {
 		path := m.GetMountPath()
 		if path == "" {
 			continue // required is enforced by tags
-		}
-		if seen[path] {
-			errs = append(errs, field.Duplicate(fldPath.Index(i).Child("mount_path"), path))
 		}
 		// Nested mounts are unsupported (volumes cannot mount onto
 		// other volumes).
@@ -447,7 +461,6 @@ func ValidateCustom_Container_VolumeMounts(_ context.Context, _ operation.Operat
 					fmt.Sprintf("must not nest under or over another mount (%q)", prior)))
 			}
 		}
-		seen[path] = true
 	}
 	return errs
 }

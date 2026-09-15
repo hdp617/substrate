@@ -77,7 +77,7 @@ function usage() {
   echo "                                         a bare --setup-csi means nfs; hostpath is Kind only)"
   echo "  --delete-ate-system                    Delete core system"
   echo "  --delete-all                           Delete core system and all registered demos"
-  echo "  --atenet-router=envoy|agentgateway     Select the ingress and egress dataplane (default: envoy)"
+  echo "  --atenet-dataplane=envoy|agentgateway  Select the atenet ingress and egress dataplane (default: envoy)"
   echo "  --podcert-workers-per-signer N         Concurrent workers per podcertificate-controller signer (default: 1)"
   echo "  --rollout-timeout DURATION             Per-workload readiness wait timeout, kubectl-style Go duration (default: 60s)"
   echo "  --otlp-endpoint URL                    Send all control plane telemetry to URL, not to the cluster default (see benchmarking/telemetry/README.md)"
@@ -218,12 +218,12 @@ run_ko() {
 }
 
 atenet_router() {
-  case "${ATE_ATENET_ROUTER:-envoy}" in
+  case "${ATE_ATENET_DATAPLANE:-envoy}" in
     envoy|agentgateway)
-      echo "${ATE_ATENET_ROUTER:-envoy}"
+      echo "${ATE_ATENET_DATAPLANE:-envoy}"
       ;;
     *)
-      echo "Error: --atenet-router must be envoy or agentgateway, got '${ATE_ATENET_ROUTER}'" >&2
+      echo "Error: --atenet-dataplane must be envoy or agentgateway, got '${ATE_ATENET_DATAPLANE}'" >&2
       exit 1
       ;;
   esac
@@ -362,7 +362,7 @@ render_atenet_egress_manifest() {
     # refuses a non-sdsmint manifest: ignoring the flag would report a
     # successful install of a gateway that has no additional checkpoint on it.
     if additional_egress_extproc_enabled; then
-      echo "Error: --experimental-additional-egress-extproc-service requires --atenet-router=envoy" >&2
+      echo "Error: --experimental-additional-egress-extproc-service requires --atenet-dataplane=envoy" >&2
       return 1
     fi
     local agentgateway_egress="manifests/ate-install/agentgateway-egress"
@@ -1104,7 +1104,7 @@ get_actor_state() {
   if ! json=$(run_kubectl_ate get actor "${actor_name}" -a "${atespace}" -o json 2>/dev/null); then
     return 1
   fi
-  jq -r '.actors[0].status.state // empty' <<<"${json}"
+  jq -r '.status.state // empty' <<<"${json}"
 }
 
 # prepare_actor_for_delete suspends (or resumes then suspends) until DeleteActor
@@ -1204,11 +1204,11 @@ wait_actortemplate_ready() {
 
   while ((SECONDS < deadline)); do
     if json=$(run_kubectl_ate get actor-template "${template}" -a "${atespace}" -o json 2>/dev/null); then
-      snapshot=$(jq -r '.actorTemplates[0].status.goldenSnapshotStatus.goldenSnapshot.snapshotUri // empty' <<<"${json}")
+      snapshot=$(jq -r '.status.goldenSnapshotStatus.goldenSnapshot.snapshotUri // empty' <<<"${json}")
       if [[ -n "${snapshot}" ]]; then
         return 0
       fi
-      error_message=$(jq -r '.actorTemplates[0].status.goldenSnapshotStatus.errorMessage // empty' <<<"${json}")
+      error_message=$(jq -r '.status.goldenSnapshotStatus.errorMessage // empty' <<<"${json}")
       if [[ -n "${error_message}" ]]; then
         echo "actor template ${atespace}/${template} failed: ${error_message}" >&2
         return 1
@@ -1432,13 +1432,13 @@ BENCHMARK_ACTOR_MEMORY=""
 prescan_args=("$@")
 for ((i = 0; i < ${#prescan_args[@]}; i++)); do
   case "${prescan_args[i]}" in
-    --atenet-router=*) ATE_ATENET_ROUTER="${prescan_args[i]#*=}" ;;
-    --atenet-router)
+    --atenet-dataplane=*) ATE_ATENET_DATAPLANE="${prescan_args[i]#*=}" ;;
+    --atenet-dataplane)
       if (( i + 1 >= ${#prescan_args[@]} )); then
-        echo "Error: --atenet-router requires envoy or agentgateway" >&2
+        echo "Error: --atenet-dataplane requires envoy or agentgateway" >&2
         exit 1
       fi
-      ATE_ATENET_ROUTER="${prescan_args[$((i + 1))]}"
+      ATE_ATENET_DATAPLANE="${prescan_args[$((i + 1))]}"
       ;;
     --experimental-use-sdsmint) ATE_EXPERIMENTAL_USE_SDSMINT=true ;;
     --experimental-additional-egress-extproc-service=*)
@@ -1540,14 +1540,14 @@ while [[ "$#" -gt 0 ]]; do
   fi
 
   case $1 in
-    --atenet-router=*) ATE_ATENET_ROUTER="${1#*=}" ;;
-    --atenet-router)
+    --atenet-dataplane=*) ATE_ATENET_DATAPLANE="${1#*=}" ;;
+    --atenet-dataplane)
       shift
       if [[ "$#" -eq 0 ]]; then
-        echo "Error: --atenet-router requires envoy or agentgateway" >&2
+        echo "Error: --atenet-dataplane requires envoy or agentgateway" >&2
         exit 1
       fi
-      ATE_ATENET_ROUTER="$1"
+      ATE_ATENET_DATAPLANE="$1"
       ;;
     # Captured in the pre-scan above; matched here only so the `*)` branch does
     # not reject it as an unknown option.

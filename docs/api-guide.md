@@ -229,7 +229,9 @@ spec:
       mountPath: /run/substrate/certs   # the actor reads /run/substrate/certs/ca.pem
 ```
 
-atelet resolves the bundle on the node when the actor starts, reading the backing object through a cluster-wide watch (the same informer dynamic refresh will later hang off) and sanitizing it the way kubelet does for projections: only `CERTIFICATE` PEM blocks are kept, deduplicated, with block headers stripped and the anchors deliberately shuffled — order carries no meaning, so consumers must not depend on it. The actor itself never talks to any bundle backend. Starting the actor fails, with an error naming the bundle, if the name is not on the allowlist, the bundle's backend is unavailable in this deployment, or the resolved bundle is missing, empty, or contains no certificates. Bundle contents are re-resolved on every Run/Restore.
+atelet resolves the bundle on the node when the actor starts, reading the backing object through a cluster-wide watch (the same informer that drives live refresh) and sanitizing it the way kubelet does for projections: only `CERTIFICATE` PEM blocks are kept, deduplicated, with block headers stripped and the anchors deliberately shuffled, so consumers must not depend on their order. The actor itself never talks to any bundle backend. Starting the actor fails, with an error naming the bundle, if the name is not on the allowlist, the bundle's backend is unavailable in this deployment, or the resolved bundle is missing, empty, or contains no certificates.
+
+Bundle contents are re-resolved on every Run/Restore and refreshed while the actor runs: when the backing bundle changes, atelet rewrites the projected file atomically at the same path. As with the Kubernetes clusterTrustBundle projection, the application must re-read the file to pick up a rotation; a runtime that loads trust anchors once at startup sees the change at its next start or resume. If a refresh fails because the backing object was deleted or is unusable, the file keeps its last good contents. Bundle publishers should rotate with overlap: add the new CA before minting leaves under it, and keep the old CA until its last leaf expires.
 
 ### Container Fields
 
@@ -238,7 +240,7 @@ Each entry in `containers` describes one process to run in the actor's sandbox.
 | Field | Type | Description |
 | :--- | :--- | :--- |
 | `name` | `string` | **Required.** DNS-label-safe container name. |
-| `image` | `string` | **Required.** Must be pinned by digest (`...@sha256:...`) — changing the image invalidates snapshots. |
+| `image` | `string` | **Required.** Container image name; must include a digest (`name@sha256:...`). |
 | `command` | `[]string` | Optional. Entrypoint array. If unset, the image's `ENTRYPOINT` is used. If set, it replaces **both** the image's `ENTRYPOINT` and `CMD`. |
 | `args` | `[]string` | Optional. Arguments to the entrypoint. If unset, the image's `CMD` is used (unless `command` is set, which discards the image's `CMD`). If set, it replaces the image's `CMD`. |
 | `env` | `[]EnvVar` | Optional. Literal `value` entries. |
@@ -328,7 +330,7 @@ metadata:
   name: secret-agent
 containers:
 - name: agent
-  image: gcr.io/my-project/my-agent:latest
+  image: gcr.io/my-project/my-agent@sha256:7f28ab0e...
   # Optional: gate Run/Restore on the agent's HTTP readiness endpoint.
   # See "Container Readiness Probe (readyz)" above.
   readyz:
@@ -394,7 +396,7 @@ This means a single, cluster-managed config pins the sandbox runtime version for
 | Field | Type | Description |
 | :--- | :--- | :--- |
 | `sandboxClass` | `string` | **Required.** Runtime family this config applies to: `gvisor` (default) or `microvm`. An `ActorTemplate` only uses `SandboxConfig`s whose `sandboxClass` matches its own. |
-| `pauseImage` | `string` | **Required.** The image for the sandbox's root container (e.g. `registry.k8s.io/pause`, or `gcr.io/gke-release/pause` on GKE). Must be pinned by digest (`...@sha256:...`) — it is recorded in each snapshot's manifest so a restore rebuilds the sandbox from the same image. |
+| `pauseImage` | `string` | **Required.** The image for the sandbox's root container (e.g. `registry.k8s.io/pause`, or `gcr.io/gke-release/pause` on GKE). Must include a digest (`...@sha256:...`) — it is recorded in each snapshot's manifest so a restore rebuilds the sandbox from the same image. |
 | `assets` | `map[arch]map[name]AssetFile` | Optional. Content-addressed files atelet fetches, keyed by architecture (`amd64`, `arm64`) then asset name. gVisor expects a `gvisor` asset (the release's `gvisor.tar.zstd`), which atelet auto-extracts. A micro-VM backend expects several. Each `AssetFile` is a `{ url, sha256 }` pair. |
 
 A cluster-wide gVisor `SandboxConfig` (`gvisor-default`) is installed with the platform, so gVisor templates can name it via `sandboxConfig.configName` without any extra setup.
@@ -446,6 +448,7 @@ Once a template is `Ready`, creating an actor logically (via `kubectl ate create
 *   **Startup Logic:** Place expensive initialization (loading large models, establishing baseline connections) in your application's entry point. These will be captured in the Golden Snapshot and won't need to be repeated on every resumption.
 *   **Placement:** Ensure your `ActorTemplate`'s `sandboxClass` matches your `WorkerPool`'s, and use the template's `workerSelector` to target specific pools — pool selection is by label match, not by namespace or RBAC.
 *   **Version Management:** When updating code, create a new `ActorTemplate` (e.g. `v2`). Substrate treats each template as an immutable state root.
+*   **Eviction:** When its worker pod is evicted, an actor gets `SIGTERM` and 30 minutes to be suspended. After that it is killed and moves to `ACTOR_STATE_CRASHED`, and everything since its last snapshot is lost. So an actor that runs for more than 30 minutes without a suspend can lose data.
 
 ---
 
@@ -475,7 +478,6 @@ Because the guards are required and only a read supplies them, an update is alwa
 Activates a suspended actor by restoring it onto a physical worker.
 *   **Request:** `ResumeActorRequest`
     *   `actor`: `ObjectRef` of the actor to resume.
-    *   `boot`: (Optional) If `true`, bypasses snapshots and performs a cold boot.
 *   **Response:** `ResumeActorResponse` containing the updated `Actor` object (including the physical worker placement in `status.worker_assignment`).
 
 #### `SuspendActor`
