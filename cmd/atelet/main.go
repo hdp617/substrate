@@ -65,6 +65,7 @@ import (
 	"github.com/spf13/pflag"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 	"golang.org/x/sync/errgroup"
@@ -555,7 +556,7 @@ func initSnapshotSizeMetric() error {
 	snapshotSizeBytes, err = otel.Meter("atelet").Int64Histogram(
 		"atelet.snapshot.size",
 		metric.WithUnit("By"),
-		metric.WithDescription("Uncompressed size in bytes of each gVisor snapshot image written during checkpoint."),
+		metric.WithDescription("Uncompressed size in bytes of each snapshot image written during checkpoint (gVisor or micro-VM)."),
 
 		metric.WithExplicitBucketBoundaries(
 			1e6, 5e6, 1e7, 2.5e7, 5e7, 1e8, 2.5e8, 5e8, 1e9, 2e9, 5e9, 1e10,
@@ -566,8 +567,10 @@ func initSnapshotSizeMetric() error {
 
 // recordSnapshotSize labels each image with the registry's file.name. That
 // label used to be spelled "kind", which means the snapshot's provenance
-// everywhere else in the ate.* namespace, not one of its files.
-func recordSnapshotSize(ctx context.Context, file, path, templateAtespace, templateName string) {
+// everywhere else in the ate.* namespace, not one of its files. sandboxClass
+// is required so dashboards can split gVisor and micro-VM without enumerating
+// templates; empty is omitted rather than recorded as unknown.
+func recordSnapshotSize(ctx context.Context, file, path, templateAtespace, templateName, sandboxClass string) {
 	if snapshotSizeBytes == nil {
 		return
 	}
@@ -580,11 +583,15 @@ func recordSnapshotSize(ctx context.Context, file, path, templateAtespace, templ
 			slog.String("file", file), slog.String("path", path), slog.Any("err", err))
 		return
 	}
-	snapshotSizeBytes.Record(ctx, fi.Size(), metric.WithAttributes(
+	attrs := []attribute.KeyValue{
 		semconv.FileNameKey.String(file),
 		ateattr.TemplateAtespaceKey.String(templateAtespace),
 		ateattr.TemplateNameKey.String(templateName),
-	))
+	}
+	if sandboxClass != "" {
+		attrs = append(attrs, ateattr.SandboxClassAttribute(sandboxClass))
+	}
+	snapshotSizeBytes.Record(ctx, fi.Size(), metric.WithAttributes(attrs...))
 }
 
 func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest) (_ *ateletpb.CheckpointResponse, err error) {
@@ -746,7 +753,7 @@ func (s *AteomHerder) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Che
 	for _, fileName := range rec.SnapshotFiles {
 		src := filepath.Join(checkpointDir, fileName)
 		dst := filepath.Join(localCheckpointPath, fileName)
-		recordSnapshotSize(ctx, fileName, src, req.GetActorTemplateAtespace(), req.GetActorTemplateName())
+		recordSnapshotSize(ctx, fileName, src, req.GetActorTemplateAtespace(), req.GetActorTemplateName(), rec.SandboxClass)
 
 		if err := os.Rename(src, dst); err != nil {
 			return fmt.Errorf("failed to move %s to %s: %w", src, dst, err)
@@ -797,7 +804,7 @@ func (s *AteomHerder) uploadSnapshot(ctx context.Context, uri resources.Snapshot
 	g, gCtx := errgroup.WithContext(ctx)
 	for _, fileName := range rec.SnapshotFiles {
 		local := filepath.Join(srcDir, fileName)
-		recordSnapshotSize(ctx, fileName, local, templateAtespace, templateName)
+		recordSnapshotSize(ctx, fileName, local, templateAtespace, templateName, rec.SandboxClass)
 		g.Go(func() error {
 			objectURI, err := uri.ObjectURI(fileName + ".zstd")
 			if err != nil {

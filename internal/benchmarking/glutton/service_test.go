@@ -40,7 +40,7 @@ func TestWriteDiskReadDiskRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
 		key  string
-		size int32
+		size int64
 	}{
 		{name: "zero size", key: "zero", size: 0},
 		{name: "small size", key: "small", size: 1024},
@@ -57,7 +57,7 @@ func TestWriteDiskReadDiskRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("WriteDisk failed: %v", err)
 			}
-			if writeResp.GetSize() != int64(tt.size) {
+			if writeResp.GetSize() != tt.size {
 				t.Errorf("WriteDisk size mismatch: got %d, want %d", writeResp.GetSize(), tt.size)
 			}
 
@@ -70,7 +70,7 @@ func TestWriteDiskReadDiskRoundTrip(t *testing.T) {
 				t.Fatalf("ReadDisk (DATA) failed: %v", err)
 			}
 
-			if readResp.GetSize() != int64(tt.size) {
+			if readResp.GetSize() != tt.size {
 				t.Errorf("ReadDisk size mismatch: got %d, want %d", readResp.GetSize(), tt.size)
 			}
 			if !bytes.Equal(readResp.GetSha256(), writeResp.GetSha256()) {
@@ -93,7 +93,7 @@ func TestWriteDiskReadDiskRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadDisk (DIGEST_ONLY) failed: %v", err)
 			}
-			if digestResp.GetSize() != int64(tt.size) {
+			if digestResp.GetSize() != tt.size {
 				t.Errorf("ReadDisk (DIGEST_ONLY) size mismatch: got %d, want %d", digestResp.GetSize(), tt.size)
 			}
 			if !bytes.Equal(digestResp.GetSha256(), writeResp.GetSha256()) {
@@ -116,7 +116,7 @@ func TestWriteDiskTruncateProducesExactSize(t *testing.T) {
 
 	ctx := context.Background()
 	key := "testfile"
-	size := int32(2048)
+	size := int64(2048)
 
 	_, err = svc.WriteDisk(ctx, &gluttonpb.WriteDiskRequest{
 		Key:       key,

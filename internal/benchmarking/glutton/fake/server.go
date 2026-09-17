@@ -60,7 +60,7 @@ type Server struct {
 
 	mu            sync.Mutex
 	paths         []string
-	writeSizes    []int32
+	writeSizes    []int64
 	readModes     []gluttonpb.ReadMode
 	ramWriteSizes []string
 	ramWriteModes []gluttonpb.WriteMode
@@ -95,10 +95,10 @@ func (s *Server) RecordedPaths() []string {
 	return append([]string(nil), s.paths...)
 }
 
-func (s *Server) RecordedWriteSizes() []int32 {
+func (s *Server) RecordedWriteSizes() []int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]int32(nil), s.writeSizes...)
+	return append([]int64(nil), s.writeSizes...)
 }
 
 func (s *Server) RecordedReadModes() []gluttonpb.ReadMode {

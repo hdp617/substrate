@@ -29,6 +29,7 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/ch"
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/kata"
+	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/ateomstats"
 	"github.com/agent-substrate/substrate/internal/imagecache"
@@ -145,12 +146,12 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	//   - Rootfs upper tar (Full only): host-backed like the durable volumes —
 	//     the memory snapshot does not carry rootfs writes. Under Data the
 	//     workload cold-starts on restore, discarding rootfs state.
-	var dSnapshot, dDurable, dUpper time.Duration
+	var dSnapshot, dMerge, dDurable, dUpper time.Duration
 	g, gctx := errgroup.WithContext(ctx)
 	if scope == ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL {
 		g.Go(func() error {
 			var err error
-			dSnapshot, err = s.snapshotVMState(gctx, client, ra, actorUID, checkpointDir)
+			dSnapshot, dMerge, err = s.snapshotVMState(gctx, client, ra, actorUID, checkpointDir)
 			return err
 		})
 	}
@@ -196,23 +197,33 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 			slog.Any("err", err))
 	}
 	dTeardown := time.Since(tTeardown)
+	dTotal := time.Since(tPause)
 
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor checkpointed", attribution)
 	slog.InfoContext(ctx, "Actor checkpointed", slog.String("id", actorUID), slog.Any("snapshot_files", snapshotFiles),
 		slog.String("scope", scope.String()), slog.Duration("pause", dPause),
-		slog.Duration("snapshot", dSnapshot),
+		slog.Duration("snapshot", dSnapshot), slog.Duration("merge", dMerge),
 		// The tars run while the guest is paused, CONCURRENTLY with the CH
-		// snapshot: the paused window costs max(snapshot, durable_dir,
+		// snapshot: the paused window costs max(snapshot+merge, durable_dir,
 		// rootfs_upper), and the tar durations scale with the actor's data.
 		slog.Duration("durable_dir", dDurable), slog.Duration("rootfs_upper", dUpper),
-		slog.Duration("teardown", dTeardown))
+		slog.Duration("teardown", dTeardown), slog.Duration("total", dTotal))
+	s.metrics.recordCheckpoint(ctx,
+		microVMPhase{ateattr.MicroVMCheckpointPhasePause, dPause},
+		microVMPhase{ateattr.MicroVMCheckpointPhaseSnapshot, dSnapshot},
+		microVMPhase{ateattr.MicroVMCheckpointPhaseMerge, dMerge},
+		microVMPhase{ateattr.MicroVMCheckpointPhaseDurableDir, dDurable},
+		microVMPhase{ateattr.MicroVMCheckpointPhaseRootfsUpper, dUpper},
+		microVMPhase{ateattr.MicroVMCheckpointPhaseTeardown, dTeardown},
+		microVMPhase{ateattr.MicroVMCheckpointPhaseTotal, dTotal},
+	)
 	return &ateompb.CheckpointWorkloadResponse{SnapshotFiles: snapshotFiles}, nil
 }
 
 // snapshotVMState captures the paused guest into checkpointDir: the CH snapshot
 // (config.json + state.json + memory-ranges) plus the base-id the restore side
-// needs, and returns how long the snapshot itself took.
-func (s *AteomService) snapshotVMState(ctx context.Context, client *ch.Client, ra *runningActor, actorUID, checkpointDir string) (time.Duration, error) {
+// needs, and returns how long the snapshot itself and any OnDemand merge took.
+func (s *AteomService) snapshotVMState(ctx context.Context, client *ch.Client, ra *runningActor, actorUID, checkpointDir string) (dSnapshot, dMerge time.Duration, err error) {
 	// Record the FROZEN base id (the id the guest's virtio-fs find-paths are pinned
 	// to, <baseID>/rootfs). For a cold-run actor this is its own id; for a restored
 	// actor it is the golden id propagated via ra.baseID (set from the snapshot we
@@ -225,15 +236,15 @@ func (s *AteomService) snapshotVMState(ctx context.Context, client *ch.Client, r
 		baseID = ra.baseID
 	}
 	if err := os.WriteFile(filepath.Join(checkpointDir, baseIDFile), []byte(baseID), 0o600); err != nil {
-		return 0, fmt.Errorf("while writing %s: %w", baseIDFile, err)
+		return 0, 0, fmt.Errorf("while writing %s: %w", baseIDFile, err)
 	}
 
 	slog.InfoContext(ctx, "Snapshotting guest", slog.String("id", actorUID), slog.String("dir", checkpointDir))
 	tSnapshot := time.Now()
 	if err := client.Snapshot(ctx, checkpointDir); err != nil {
-		return 0, fmt.Errorf("while snapshotting guest: %w", err)
+		return 0, 0, fmt.Errorf("while snapshotting guest: %w", err)
 	}
-	dSnapshot := time.Since(tSnapshot)
+	dSnapshot = time.Since(tSnapshot)
 
 	// Diff-snapshot completion for an OnDemand-restored actor: CH's snapshot here is
 	// sparse — only the pages faulted in since the OnDemand restore — so on its own
@@ -255,15 +266,16 @@ func (s *AteomService) snapshotVMState(ctx context.Context, client *ch.Client, r
 		// CH is paused and about to be torn down, and base is discarded after. See
 		// MergeDeltaIntoBase. (Falls back to the copying merge across filesystems.)
 		if err := ch.MergeDeltaIntoBase(ctx, base, delta); err != nil {
-			return 0, fmt.Errorf("while merging OnDemand delta into restore source: %w", err)
+			return 0, 0, fmt.Errorf("while merging OnDemand delta into restore source: %w", err)
 		}
+		dMerge = time.Since(tMerge)
 		slog.InfoContext(ctx, "Merged OnDemand delta into base (complete snapshot)",
-			slog.String("id", actorUID), slog.Duration("merge", time.Since(tMerge)))
+			slog.String("id", actorUID), slog.Duration("merge", dMerge))
 	}
 
 	// The RO lower never ships (reconstructed from the OCI image at restore).
 	// The disk-backed upper ships as its own tar from CheckpointWorkload; a
-	return dSnapshot, nil
+	return dSnapshot, dMerge, nil
 }
 
 // listFiles returns the (relative) names of regular files directly under dir.

@@ -48,43 +48,40 @@ import (
 )
 
 const (
-	// Locust class name from tests/durdir.py; must match boomer.Task.Name.
-	durDirUserClass    = "DurdirUser"
-	defaultDurTemplate = "glutton-durdir-data"
+	// Locust class name from tests/disk.py; must match boomer.Task.Name.
+	diskUserClass = "DiskUser"
+	// defaultDiskTemplate writes to /tmp/glutton, the micro-VM rootfs upper
+	// layer, so a suspend/resume cycle exercises the durable-dir path.
+	defaultDiskTemplate = "glutton"
 
-	writeDiskRoute = "/writedisk"
-	readDiskRoute  = "/readdisk"
-
-	durDirTestFile = "bench-data"
-
-	defaultFileSize int64 = 8388608 // 8 MiB
+	diskTestFile = "disk-bench-data"
 )
 
 func init() {
 	userclass.Add(userclass.Entry{
-		Name:       "durdir",
-		LocustFile: "durdir.py",
-		UserClass:  durDirUserClass,
-		Init:       initDurDir,
+		Name:       "disk",
+		LocustFile: "disk.py",
+		UserClass:  diskUserClass,
+		Init:       initDisk,
 	})
 }
 
-// initDurDir creates a runtime tied to cfg and returns a boomer-compatible task
+// initDisk creates a runtime tied to cfg and returns a boomer-compatible task
 // function plus a Shutdown hook the caller should run before exit.
-func initDurDir(cfg *userclass.Config) (taskFn func(), shutdown func(context.Context)) {
+func initDisk(cfg *userclass.Config) (taskFn func(), shutdown func(context.Context)) {
 	if cfg.Tracer == nil {
-		cfg.Tracer = otel.Tracer("substrate-boomer/glutton-durdir")
+		cfg.Tracer = otel.Tracer("substrate-boomer/glutton-disk")
 	}
-	rt := &durDirRuntime{cfg: cfg}
+	rt := &diskRuntime{cfg: cfg}
 	return rt.iterate, rt.shutdown
 }
 
-type durDirRuntime struct {
+type diskRuntime struct {
 	cfg   *userclass.Config
-	users sync.Map // goroutineID -> *durDirUser
+	users sync.Map // goroutineID -> *diskUser
 }
 
-func (r *durDirRuntime) dynamicWait() time.Duration {
+func (r *diskRuntime) dynamicWait() time.Duration {
 	cfg := r.cfg.Dyn.Load()
 	if cfg.MaxWait <= cfg.MinWait {
 		return cfg.MinWait
@@ -93,21 +90,21 @@ func (r *durDirRuntime) dynamicWait() time.Duration {
 	return cfg.MinWait + time.Duration(rand.Float64()*float64(jitter))
 }
 
-func (r *durDirRuntime) iterate() {
+func (r *diskRuntime) iterate() {
 	gid := boomerutil.GoroutineID()
 	val, loaded := r.users.Load(gid)
 	if !loaded {
 		dynCfg := r.cfg.Dyn.Load()
 		u, err := r.startUser(context.Background(), dynCfg)
 		if err != nil {
-			slog.Warn("durdir on_start failed; goroutine will retry next iter",
+			slog.Warn("disk on_start failed; goroutine will retry next iter",
 				slog.String("err", err.Error()))
 			time.Sleep(r.dynamicWait())
 			return
 		}
 		val, _ = r.users.LoadOrStore(gid, u)
 	}
-	user := val.(*durDirUser)
+	user := val.(*diskUser)
 
 	dynCfg := r.cfg.Dyn.Load()
 	ctx := context.Background()
@@ -116,75 +113,59 @@ func (r *durDirRuntime) iterate() {
 	time.Sleep(r.dynamicWait())
 }
 
-func (r *durDirRuntime) startUser(ctx context.Context, dynCfg dynconfig.Config) (*durDirUser, error) {
+func (r *diskRuntime) startUser(ctx context.Context, dynCfg dynconfig.Config) (*diskUser, error) {
 	tmpl := dynCfg.DurDirTemplate
 	if tmpl == "" {
-		tmpl = defaultDurTemplate
+		tmpl = defaultDiskTemplate
 	}
 
-	u := &durDirUser{
+	u := &diskUser{
 		cfg:          r.cfg,
 		actorName:    "sb-" + uuid.NewString(),
 		templateName: tmpl,
-		userClass:    durDirUserClass,
+		userClass:    diskUserClass,
 	}
-	u.metricWrite, u.metricServeInitial, u.metricAfterResume, u.metricWarm, u.metricOverwrite = defaultDurDirMetrics()
-	bmetrics.UpdateUsers(durDirUserClass, 1)
+	bmetrics.UpdateUsers(diskUserClass, 1)
 	if err := u.ensureAtespace(ctx); err != nil {
-		bmetrics.UpdateUsers(durDirUserClass, -1)
+		bmetrics.UpdateUsers(diskUserClass, -1)
 		return nil, err
 	}
 	if err := u.create(ctx); err != nil {
-		bmetrics.UpdateUsers(durDirUserClass, -1)
+		bmetrics.UpdateUsers(diskUserClass, -1)
 		return nil, err
 	}
 	if err := u.bootstrap(ctx, dynCfg); err != nil {
 		u.hibernateAndDelete(ctx, dynCfg)
-		bmetrics.UpdateUsers(durDirUserClass, -1)
+		bmetrics.UpdateUsers(diskUserClass, -1)
 		return nil, err
 	}
 	return u, nil
 }
 
-func (r *durDirRuntime) shutdown(ctx context.Context) {
+func (r *diskRuntime) shutdown(ctx context.Context) {
 	dynCfg := r.cfg.Dyn.Load()
 	r.users.Range(func(_, val any) bool {
-		u := val.(*durDirUser)
+		u := val.(*diskUser)
 		u.hibernateAndDelete(ctx, dynCfg)
-		bmetrics.UpdateUsers(durDirUserClass, -1)
+		bmetrics.UpdateUsers(diskUserClass, -1)
 		return true
 	})
 }
 
-type durDirUser struct {
+type diskUser struct {
 	cfg            *userclass.Config
 	actorName      string
 	templateName   string
 	userClass      string
 	expectedDigest string
 	expectedSize   int64
-	// Metric row names. DiskUser reuses this cycle against the rootfs upper
-	// with different names so dashboards do not mix DurableDir and rootfs.
-	metricWrite        string
-	metricServeInitial string
-	metricAfterResume  string
-	metricWarm         string
-	metricOverwrite    string
 }
 
-func defaultDurDirMetrics() (write, initial, after, warm, overwrite string) {
-	return "DurDirWrite", "DurDirServeInitial", "DurDirServeAfterResume", "DurDirServeWarm", "DurDirOverwrite"
-}
-
-func defaultDiskMetrics() (write, initial, after, warm, overwrite string) {
-	return "WriteDisk", "ReadDiskInitial", "ReadDiskAfterResume", "ReadDiskWarm", "WriteDiskOverwrite"
-}
-
-func (u *durDirUser) ref() *ateapipb.ObjectRef {
+func (u *diskUser) ref() *ateapipb.ObjectRef {
 	return &ateapipb.ObjectRef{Atespace: u.cfg.Atespace, Name: u.actorName}
 }
 
-func (u *durDirUser) ensureAtespace(ctx context.Context) error {
+func (u *diskUser) ensureAtespace(ctx context.Context) error {
 	return u.tracedCall(ctx, "CreateAtespace", func(callCtx context.Context, tr *metadata.MD) error {
 		_, err := u.cfg.APIStub.CreateAtespace(callCtx, &ateapipb.CreateAtespaceRequest{
 			Atespace: &ateapipb.Atespace{
@@ -203,7 +184,7 @@ func (u *durDirUser) ensureAtespace(ctx context.Context) error {
 	})
 }
 
-func (u *durDirUser) create(ctx context.Context) error {
+func (u *diskUser) create(ctx context.Context) error {
 	return u.tracedCall(ctx, "CreateActor", func(callCtx context.Context, tr *metadata.MD) error {
 		_, err := u.cfg.APIStub.CreateActor(callCtx, &ateapipb.CreateActorRequest{
 			Actor: &ateapipb.Actor{
@@ -215,7 +196,7 @@ func (u *durDirUser) create(ctx context.Context) error {
 	})
 }
 
-func (u *durDirUser) resume(ctx context.Context, mode string) bool {
+func (u *diskUser) resume(ctx context.Context, mode string) bool {
 	// In implicit mode, the actor stays suspended until router traffic wakes it.
 	if mode == dynconfig.ResumeModeImplicit {
 		return true
@@ -229,7 +210,7 @@ func (u *durDirUser) resume(ctx context.Context, mode string) bool {
 	return err == nil
 }
 
-func (u *durDirUser) pause(ctx context.Context) {
+func (u *diskUser) pause(ctx context.Context) {
 	_ = u.tracedCall(ctx, "PauseActor", func(callCtx context.Context, tr *metadata.MD) error {
 		_, err := u.cfg.APIStub.PauseActor(callCtx, &ateapipb.PauseActorRequest{
 			Actor: u.ref(),
@@ -238,7 +219,7 @@ func (u *durDirUser) pause(ctx context.Context) {
 	})
 }
 
-func (u *durDirUser) suspend(ctx context.Context) {
+func (u *diskUser) suspend(ctx context.Context) {
 	_ = u.tracedCall(ctx, "SuspendActor", func(callCtx context.Context, tr *metadata.MD) error {
 		_, err := u.cfg.APIStub.SuspendActor(callCtx, &ateapipb.SuspendActorRequest{
 			Actor: u.ref(),
@@ -247,7 +228,7 @@ func (u *durDirUser) suspend(ctx context.Context) {
 	})
 }
 
-func (u *durDirUser) hibernate(ctx context.Context, dynCfg dynconfig.Config) {
+func (u *diskUser) hibernate(ctx context.Context, dynCfg dynconfig.Config) {
 	if dynCfg.LifecycleMode == dynconfig.LifecycleModePause {
 		u.pause(ctx)
 	} else {
@@ -258,7 +239,7 @@ func (u *durDirUser) hibernate(ctx context.Context, dynCfg dynconfig.Config) {
 // hibernateAndDelete hibernates (suspends or pauses) the actor before deleting it.
 // The hibernate call is unmetered (teardown precondition, not benchmark latency),
 // while the delete is metered so true leaks still surface in failures.csv.
-func (u *durDirUser) hibernateAndDelete(ctx context.Context, dynCfg dynconfig.Config) {
+func (u *diskUser) hibernateAndDelete(ctx context.Context, dynCfg dynconfig.Config) {
 	if dynCfg.LifecycleMode == dynconfig.LifecycleModePause {
 		_, _ = u.cfg.APIStub.PauseActor(ctx, &ateapipb.PauseActorRequest{
 			Actor: u.ref(),
@@ -271,7 +252,7 @@ func (u *durDirUser) hibernateAndDelete(ctx context.Context, dynCfg dynconfig.Co
 	u.delete(ctx)
 }
 
-func (u *durDirUser) delete(ctx context.Context) {
+func (u *diskUser) delete(ctx context.Context) {
 	_ = u.tracedCall(ctx, "DeleteActor", func(callCtx context.Context, tr *metadata.MD) error {
 		_, err := u.cfg.APIStub.DeleteActor(callCtx, &ateapipb.DeleteActorRequest{
 			Actor:    u.ref(),
@@ -281,7 +262,7 @@ func (u *durDirUser) delete(ctx context.Context) {
 	})
 }
 
-func (u *durDirUser) tracedCall(ctx context.Context, name string, do func(context.Context, *metadata.MD) error) error {
+func (u *diskUser) tracedCall(ctx context.Context, name string, do func(context.Context, *metadata.MD) error) error {
 	ctx, span := u.cfg.Tracer.Start(ctx, name)
 	defer span.End()
 
@@ -303,7 +284,7 @@ func (u *durDirUser) tracedCall(ctx context.Context, name string, do func(contex
 	return nil
 }
 
-func (u *durDirUser) params(dynCfg dynconfig.Config) (int64, gluttonpb.ReadMode) {
+func (u *diskUser) params(dynCfg dynconfig.Config) (int64, gluttonpb.ReadMode) {
 	fileSize := dynCfg.DurDirFileSize
 	if fileSize <= 0 {
 		fileSize = defaultFileSize
@@ -315,7 +296,7 @@ func (u *durDirUser) params(dynCfg dynconfig.Config) (int64, gluttonpb.ReadMode)
 	return fileSize, readMode
 }
 
-func (u *durDirUser) step(ctx context.Context, dynCfg dynconfig.Config) {
+func (u *diskUser) step(ctx context.Context, dynCfg dynconfig.Config) {
 	fileSize, readMode := u.params(dynCfg)
 
 	// 1. Suspend or pause actor
@@ -326,45 +307,40 @@ func (u *durDirUser) step(ctx context.Context, dynCfg dynconfig.Config) {
 		return
 	}
 
-	// 3. Serve after resume (durability assertion: verify restored bytes)
-	if err := u.readDisk(ctx, u.metricAfterResume, readMode); err != nil {
+	// 3. Read after resume (durability assertion: verify restored bytes)
+	if err := u.readDisk(ctx, "ReadDiskAfterResume", readMode); err != nil {
 		return
 	}
 
-	// 4. Serve warm (immediate second read: measures page cache warming delta)
-	if err := u.readDisk(ctx, u.metricWarm, readMode); err != nil {
+	// 4. Read warm (immediate second read: measures page cache warming delta)
+	if err := u.readDisk(ctx, "ReadDiskWarm", readMode); err != nil {
 		return
 	}
 
 	// 5. Overwrite file with fresh random bytes
-	if err := u.writeDisk(ctx, u.metricOverwrite, fileSize, gluttonpb.WriteMode_WRITE_MODE_TRUNCATE); err != nil {
+	if err := u.writeDisk(ctx, "WriteDiskOverwrite", fileSize, gluttonpb.WriteMode_WRITE_MODE_TRUNCATE); err != nil {
 		return
 	}
 }
 
-func (u *durDirUser) bootstrap(ctx context.Context, dynCfg dynconfig.Config) error {
-	fileSize, readMode := u.params(dynCfg)
+func (u *diskUser) bootstrap(ctx context.Context, dynCfg dynconfig.Config) error {
+	fileSize, _ := u.params(dynCfg)
 
 	if !u.resume(ctx, dynCfg.ResumeMode) {
 		return fmt.Errorf("initial resume failed")
 	}
 
-	// Initial write to create the test file
-	if err := u.writeDisk(ctx, u.metricWrite, fileSize, gluttonpb.WriteMode_WRITE_MODE_TRUNCATE); err != nil {
+	// Initial write to create the disk-benchmark file.
+	if err := u.writeDisk(ctx, "WriteDisk", fileSize, gluttonpb.WriteMode_WRITE_MODE_TRUNCATE); err != nil {
 		return fmt.Errorf("initial WriteDisk failed: %w", err)
-	}
-
-	// Initial read to verify file
-	if err := u.readDisk(ctx, u.metricServeInitial, readMode); err != nil {
-		return fmt.Errorf("initial ReadDisk failed: %w", err)
 	}
 
 	return nil
 }
 
-func (u *durDirUser) writeDisk(ctx context.Context, metricName string, size int64, mode gluttonpb.WriteMode) error {
+func (u *diskUser) writeDisk(ctx context.Context, metricName string, size int64, mode gluttonpb.WriteMode) error {
 	req := &gluttonpb.WriteDiskRequest{
-		Key:       durDirTestFile,
+		Key:       diskTestFile,
 		Size:      size,
 		WriteMode: mode,
 	}
@@ -400,9 +376,9 @@ func (u *durDirUser) writeDisk(ctx context.Context, metricName string, size int6
 	return nil
 }
 
-func (u *durDirUser) readDisk(ctx context.Context, metricName string, readMode gluttonpb.ReadMode) error {
+func (u *diskUser) readDisk(ctx context.Context, metricName string, readMode gluttonpb.ReadMode) error {
 	req := &gluttonpb.ReadDiskRequest{
-		Key:      durDirTestFile,
+		Key:      diskTestFile,
 		ReadMode: readMode,
 	}
 	body, err := proto.Marshal(req)
@@ -443,7 +419,7 @@ func (u *durDirUser) readDisk(ctx context.Context, metricName string, readMode g
 // httpProtoCall issues a POST request to route with body and records metrics and traces.
 // Metrics record client-perceived latency because the measurement target is Substrate,
 // not glutton.
-func (u *durDirUser) httpProtoCall(ctx context.Context, metricName, route string, body []byte, validate func([]byte) error) ([]byte, error) {
+func (u *diskUser) httpProtoCall(ctx context.Context, metricName, route string, body []byte, validate func([]byte) error) ([]byte, error) {
 	ctx, span := u.cfg.Tracer.Start(ctx, metricName)
 	defer span.End()
 

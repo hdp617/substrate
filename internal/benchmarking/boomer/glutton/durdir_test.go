@@ -100,7 +100,7 @@ func TestDurDirUsesConfiguredFileSize(t *testing.T) {
 	if len(recorded) != 1 {
 		t.Fatalf("recorded write sizes: got %d calls, want 1", len(recorded))
 	}
-	if int64(recorded[0]) != configuredSize {
+	if recorded[0] != configuredSize {
 		t.Errorf("WriteDisk received size %d, want %d", recorded[0], configuredSize)
 	}
 }

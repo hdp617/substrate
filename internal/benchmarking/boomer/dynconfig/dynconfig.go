@@ -24,7 +24,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -46,6 +45,12 @@ const (
 	LifecycleModeSuspend = "suspend"
 	LifecycleModePause   = "pause"
 )
+
+// maxDurDirFileSize caps DurDirFileSize (and the equivalent disk-benchmark
+// file size) well above WriteDiskRequest.Size's old int32 ceiling — glutton
+// now accepts an int64 — while still rejecting operator typos that would
+// otherwise fill a micro-VM's rootfs upper layer.
+const maxDurDirFileSize int64 = 1 << 34 // 16 GiB
 
 // Config is the dynamic-mutable subset of boomer's behavior. Holder swaps
 // it atomically so task goroutines read a consistent snapshot.
@@ -165,8 +170,8 @@ func (c Config) Validate() error {
 	if c.DurDirFileSize < 0 {
 		return fmt.Errorf("durdir_file_size_bytes cannot be negative: %d", c.DurDirFileSize)
 	}
-	if c.DurDirFileSize > math.MaxInt32 {
-		return fmt.Errorf("durdir_file_size_bytes cannot exceed %d (2 GiB), got: %d", math.MaxInt32, c.DurDirFileSize)
+	if c.DurDirFileSize > maxDurDirFileSize {
+		return fmt.Errorf("durdir_file_size_bytes cannot exceed %d (16 GiB), got: %d", maxDurDirFileSize, c.DurDirFileSize)
 	}
 	if c.ResumeMode != "" && c.ResumeMode != ResumeModeExplicit && c.ResumeMode != ResumeModeImplicit {
 		return fmt.Errorf("invalid resume_mode %q: must be %q or %q", c.ResumeMode, ResumeModeExplicit, ResumeModeImplicit)

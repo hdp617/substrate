@@ -16,8 +16,10 @@ limitations under the License.
 
 # Micro-VM suspend/resume and storage benchmark suite
 
-**Status:** proposal. This document is the plan for a micro-VM-focused
-benchmark suite. It is not a description of something that already runs.
+**Status:** partially implemented. Phase 0 (ateom phase metrics +
+`atelet.snapshot.size` sandbox-class label) and Phase 1–2 harness entries
+(micro-VM baselines, DiskUser rootfs cycle, dirty-size sweep) are in tree.
+Phase 3 (virtio-blk A/B) remains blocked on a runtime prototype.
 
 The suite has two jobs, in this order:
 
