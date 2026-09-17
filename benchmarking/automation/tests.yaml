@@ -798,6 +798,29 @@ tests:
       - "1.0"
       - "--max-wait-time"
       - "1.0"
+  - name: microvm_durdir_full_1g
+    type: locust
+    description: "micro-VM DurDir full-scope: 1 GiB file"
+    targetCluster: dev
+    file: /app/tests/durdir.py
+    duration: 2m
+    users: 1
+    workerCount: 1
+    sandboxClass: microvm
+    actorMemory: "1536Mi"
+    flags:
+      - "--durdir-template"
+      - "glutton-durdir-full"
+      - "--resume-mode"
+      - "explicit"
+      - "--durdir-read-mode"
+      - "digest"
+      - "--durdir-file-size-bytes"
+      - "1073741824"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
   - name: microvm_glutton_baseline_implicit
     type: locust
     description: "micro-VM empty-actor implicit (router) resume: 1 user"

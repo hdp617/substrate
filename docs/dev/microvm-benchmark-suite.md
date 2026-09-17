@@ -16,10 +16,11 @@ limitations under the License.
 
 # Micro-VM suspend/resume and storage benchmark suite
 
-**Status:** partially implemented. Phase 0 (ateom phase metrics +
-`atelet.snapshot.size` sandbox-class label) and Phase 1–2 harness entries
-(micro-VM baselines, DiskUser rootfs cycle, dirty-size sweep) are in tree.
-Phase 3 (virtio-blk A/B) remains blocked on a runtime prototype.
+**Status:** Phases 0–2 (dirty-size sweep scaffolding) are implemented.
+Phase 3 (virtio-blk A/B) remains blocked on a runtime prototype. Patterns
+beyond the size sweep (`many-small`, overwrite-rotate churn, RAM×disk
+Matrix D) are listed in the matrix but not yet wired as `tests.yaml`
+entries.
 
 The suite has two jobs, in this order:
 
