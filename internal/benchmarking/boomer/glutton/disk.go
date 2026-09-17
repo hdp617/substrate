@@ -50,8 +50,9 @@ import (
 const (
 	// Locust class name from tests/disk.py; must match boomer.Task.Name.
 	diskUserClass = "DiskUser"
-	// defaultDiskTemplate writes to /tmp/glutton, the micro-VM rootfs upper
-	// layer, so a suspend/resume cycle exercises the durable-dir path.
+	// defaultDiskTemplate writes to /tmp/glutton — on micro-VM that is the
+	// host overlay rootfs upper, so a suspend/resume cycle exercises Full
+	// snapshot of dirty rootfs state.
 	defaultDiskTemplate = "glutton"
 
 	diskTestFile = "disk-bench-data"

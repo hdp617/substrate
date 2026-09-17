@@ -16,69 +16,304 @@ package glutton
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"net/http"
 	"reflect"
+	"regexp"
+	"slices"
 	"testing"
 
+	"github.com/agent-substrate/substrate/internal/benchmarking/boomer/boomerutil"
 	"github.com/agent-substrate/substrate/internal/benchmarking/boomer/dynconfig"
 	"github.com/agent-substrate/substrate/internal/benchmarking/boomer/userclass"
 	"github.com/agent-substrate/substrate/internal/benchmarking/glutton/fake"
+	gluttonpb "github.com/agent-substrate/substrate/internal/proto/glutton"
 )
 
-func TestDiskUserDefaultsToGluttonTemplate(t *testing.T) {
-	srv := &fake.Server{Data: []byte("rootfs")}
-	fakeCtrl := &fakeControlClient{}
-	cfg := newTestConfig(t, srv, &userclass.Config{
-		APIStub: fakeCtrl,
-		Dyn: dynconfig.NewHolder(dynconfig.Config{
-			DurDirFileSize: int64(len(srv.Data)),
-			ResumeMode:     dynconfig.ResumeModeExplicit,
-		}),
-	})
-
-	rt := &diskRuntime{cfg: cfg}
-	u, err := rt.startUser(context.Background(), cfg.Dyn.Load())
-	if err != nil {
-		t.Fatalf("startUser failed: %v", err)
-	}
-	if u.templateName != defaultDiskTemplate {
-		t.Errorf("templateName = %q, want %q", u.templateName, defaultDiskTemplate)
-	}
-	if u.userClass != diskUserClass {
-		t.Errorf("userClass = %q, want %q", u.userClass, diskUserClass)
-	}
-	if u.metricAfterResume != "ReadDiskAfterResume" {
-		t.Errorf("metricAfterResume = %q, want ReadDiskAfterResume", u.metricAfterResume)
-	}
-}
-
-func TestDiskLoopSequence(t *testing.T) {
-	srv := &fake.Server{Data: []byte("seq content")}
-	fakeCtrl := &fakeControlClient{}
-	cfg := &userclass.Config{
-		APIStub: fakeCtrl,
-		Dyn: dynconfig.NewHolder(dynconfig.Config{
-			ResumeMode: dynconfig.ResumeModeExplicit,
-		}),
-	}
+func newTestDiskUser(t *testing.T, srv *fake.Server, cfg *userclass.Config) *diskUser {
+	t.Helper()
 	c := newTestConfig(t, srv, cfg)
-	u := &durDirUser{
+	return &diskUser{
 		cfg:          c,
 		actorName:    "diskactor",
 		templateName: defaultDiskTemplate,
 		userClass:    diskUserClass,
 		expectedSize: int64(len(srv.Data)),
 	}
-	u.metricWrite, u.metricServeInitial, u.metricAfterResume, u.metricWarm, u.metricOverwrite = defaultDiskMetrics()
-	u.expectedDigest = srv.HexDigest()
+}
 
-	u.step(context.Background(), c.Dyn.Load())
-
-	wantGRPC := []string{"SuspendActor", "ResumeActor"}
-	if got := fakeCtrl.recordedCalls(); !reflect.DeepEqual(got, wantGRPC) {
-		t.Errorf("gRPC calls: got %v, want %v", got, wantGRPC)
+func TestDiskLoopSequence(t *testing.T) {
+	tests := []struct {
+		name          string
+		resumeMode    string
+		lifecycleMode string
+		wantGRPCCall  []string
+		wantHTTPCall  []string
+	}{
+		{
+			name:         "explicit resume mode",
+			resumeMode:   dynconfig.ResumeModeExplicit,
+			wantGRPCCall: []string{"SuspendActor", "ResumeActor"},
+			wantHTTPCall: []string{fake.ReadDiskRoute, fake.ReadDiskRoute, fake.WriteDiskRoute},
+		},
+		{
+			name:         "implicit resume mode",
+			resumeMode:   dynconfig.ResumeModeImplicit,
+			wantGRPCCall: []string{"SuspendActor"}, // No ResumeActor RPC!
+			wantHTTPCall: []string{fake.ReadDiskRoute, fake.ReadDiskRoute, fake.WriteDiskRoute},
+		},
+		{
+			name:          "pause lifecycle mode",
+			lifecycleMode: dynconfig.LifecycleModePause,
+			resumeMode:    dynconfig.ResumeModeExplicit,
+			wantGRPCCall:  []string{"PauseActor", "ResumeActor"},
+			wantHTTPCall:  []string{fake.ReadDiskRoute, fake.ReadDiskRoute, fake.WriteDiskRoute},
+		},
 	}
-	wantHTTP := []string{fake.ReadDiskRoute, fake.ReadDiskRoute, fake.WriteDiskRoute}
-	if got := srv.RecordedPaths(); !reflect.DeepEqual(got, wantHTTP) {
-		t.Errorf("HTTP calls: got %v, want %v", got, wantHTTP)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &fake.Server{Data: []byte("seq content")}
+			fakeCtrl := &fakeControlClient{}
+			cfg := &userclass.Config{
+				APIStub: fakeCtrl,
+				Dyn: dynconfig.NewHolder(dynconfig.Config{
+					ResumeMode:    tc.resumeMode,
+					LifecycleMode: tc.lifecycleMode,
+				}),
+			}
+			du := newTestDiskUser(t, srv, cfg)
+			du.expectedDigest = srv.HexDigest()
+
+			dynCfg := cfg.Dyn.Load()
+			du.step(context.Background(), dynCfg)
+
+			if got := fakeCtrl.recordedCalls(); !reflect.DeepEqual(got, tc.wantGRPCCall) {
+				t.Errorf("gRPC calls: got %v, want %v", got, tc.wantGRPCCall)
+			}
+			if got := srv.RecordedPaths(); !reflect.DeepEqual(got, tc.wantHTTPCall) {
+				t.Errorf("HTTP calls: got %v, want %v", got, tc.wantHTTPCall)
+			}
+		})
+	}
+}
+
+func TestDiskUsesConfiguredFileSize(t *testing.T) {
+	configuredSize := int64(1048576) // 1 MiB
+	srv := &fake.Server{Data: make([]byte, configuredSize)}
+	du := newTestDiskUser(t, srv, nil)
+
+	if err := du.writeDisk(context.Background(), "TestConfiguredSize", configuredSize, gluttonpb.WriteMode_WRITE_MODE_TRUNCATE); err != nil {
+		t.Fatalf("writeDisk failed: %v", err)
+	}
+
+	recorded := srv.RecordedWriteSizes()
+	if len(recorded) != 1 {
+		t.Fatalf("recorded write sizes: got %d calls, want 1", len(recorded))
+	}
+	if recorded[0] != configuredSize {
+		t.Errorf("WriteDisk received size %d, want %d", recorded[0], configuredSize)
+	}
+}
+
+// TestDiskAcceptsSizeBeyondOldInt32Ceiling exercises the WriteDiskRequest.size
+// widening to int64: a size above the old int32 max (2 GiB) must marshal onto
+// the wire without truncation or overflow. The fake server always reports
+// len(Data) back, so a real byte buffer of this size is not needed; only the
+// outgoing wire value under test is checked, and the (expected) response-size
+// mismatch error is ignored.
+func TestDiskAcceptsSizeBeyondOldInt32Ceiling(t *testing.T) {
+	beyondInt32 := int64(1) << 32 // 4 GiB
+	srv := &fake.Server{}
+	du := newTestDiskUser(t, srv, nil)
+
+	_ = du.writeDisk(context.Background(), t.Name(), beyondInt32, gluttonpb.WriteMode_WRITE_MODE_TRUNCATE)
+
+	recorded := srv.RecordedWriteSizes()
+	if len(recorded) != 1 {
+		t.Fatalf("recorded write sizes: got %d calls, want 1", len(recorded))
+	}
+	if recorded[0] != beyondInt32 {
+		t.Errorf("WriteDisk received size %d, want %d", recorded[0], beyondInt32)
+	}
+}
+
+func TestDiskTestFileIsAValidGluttonKey(t *testing.T) {
+	if !regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString(diskTestFile) {
+		t.Fatalf("diskTestFile %q would be rejected by glutton", diskTestFile)
+	}
+}
+
+func TestDiskDigestOnlyAcceptsEmptyPayload(t *testing.T) {
+	srv := &fake.Server{
+		Data:         make([]byte, 1024),
+		EmptyPayload: true,
+	}
+	du := newTestDiskUser(t, srv, nil)
+	du.expectedDigest = srv.HexDigest()
+
+	if err := du.readDisk(context.Background(), t.Name(), gluttonpb.ReadMode_READ_MODE_DIGEST_ONLY); err != nil {
+		t.Fatalf("expected readDisk to succeed in digest-only mode with empty payload, got: %v", err)
+	}
+}
+
+func TestDiskDataModeRejectsEmptyPayload(t *testing.T) {
+	srv := &fake.Server{
+		Data:         make([]byte, 1024),
+		EmptyPayload: true,
+	}
+	du := newTestDiskUser(t, srv, nil)
+	du.expectedDigest = srv.HexDigest()
+
+	if err := du.readDisk(context.Background(), t.Name(), gluttonpb.ReadMode_READ_MODE_DATA); err == nil {
+		t.Fatalf("expected readDisk to fail in data mode with empty payload, got nil")
+	}
+}
+
+func TestDiskDigestOnlyStillRejectsWrongDigest(t *testing.T) {
+	wrongHash := sha256.Sum256([]byte("wrong data"))
+	srv := &fake.Server{
+		Data:         make([]byte, 1024),
+		Digest:       wrongHash[:],
+		EmptyPayload: true,
+	}
+	du := newTestDiskUser(t, srv, nil)
+	h := sha256.Sum256(srv.Data)
+	du.expectedDigest = hex.EncodeToString(h[:])
+
+	if err := du.readDisk(context.Background(), t.Name(), gluttonpb.ReadMode_READ_MODE_DIGEST_ONLY); err == nil {
+		t.Fatalf("expected readDisk to fail in digest-only mode on wrong digest, got nil")
+	}
+}
+
+func TestDiskReadModeSentOnWire(t *testing.T) {
+	srv := &fake.Server{}
+	du := newTestDiskUser(t, srv, nil)
+	du.expectedDigest = srv.HexDigest()
+
+	if err := du.readDisk(context.Background(), t.Name(), gluttonpb.ReadMode_READ_MODE_DIGEST_ONLY); err != nil {
+		t.Fatalf("readDisk failed: %v", err)
+	}
+
+	recorded := srv.RecordedReadModes()
+	if len(recorded) != 1 {
+		t.Fatalf("recorded read modes: got %d calls, want 1", len(recorded))
+	}
+	if recorded[0] != gluttonpb.ReadMode_READ_MODE_DIGEST_ONLY {
+		t.Errorf("wire ReadMode: got %v, want %v", recorded[0], gluttonpb.ReadMode_READ_MODE_DIGEST_ONLY)
+	}
+}
+
+func TestDiskBootstrapUsesConfiguredResumeMode(t *testing.T) {
+	tests := []struct {
+		name            string
+		resumeMode      string
+		wantResumeActor bool
+	}{
+		{
+			name:            "explicit resume mode",
+			resumeMode:      dynconfig.ResumeModeExplicit,
+			wantResumeActor: true,
+		},
+		{
+			name:            "implicit resume mode",
+			resumeMode:      dynconfig.ResumeModeImplicit,
+			wantResumeActor: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &fake.Server{Data: []byte("data")}
+			fakeCtrl := &fakeControlClient{}
+			cfg := newTestConfig(t, srv, &userclass.Config{
+				APIStub: fakeCtrl,
+				Dyn: dynconfig.NewHolder(dynconfig.Config{
+					DurDirFileSize: int64(len(srv.Data)),
+					ResumeMode:     tc.resumeMode,
+				}),
+			})
+
+			rt := &diskRuntime{cfg: cfg}
+			_, err := rt.startUser(context.Background(), cfg.Dyn.Load())
+			if err != nil {
+				t.Fatalf("startUser failed: %v", err)
+			}
+
+			calls := fakeCtrl.recordedCalls()
+			gotResumeActor := slices.Contains(calls, "ResumeActor")
+			if gotResumeActor != tc.wantResumeActor {
+				t.Errorf("ResumeActor in recordedCalls: got %v, want %v (calls = %v)", gotResumeActor, tc.wantResumeActor, calls)
+			}
+		})
+	}
+}
+
+func TestDiskBootstrapFailureSuspendsBeforeDelete(t *testing.T) {
+	srv := &fake.Server{Status: http.StatusInternalServerError}
+	fakeCtrl := &fakeControlClient{}
+	cfg := newTestConfig(t, srv, &userclass.Config{
+		APIStub: fakeCtrl,
+		Dyn: dynconfig.NewHolder(dynconfig.Config{
+			DurDirFileSize: 1024,
+			ResumeMode:     dynconfig.ResumeModeExplicit,
+		}),
+	})
+
+	rt := &diskRuntime{cfg: cfg}
+	_, err := rt.startUser(context.Background(), cfg.Dyn.Load())
+	if err == nil {
+		t.Fatalf("startUser expected error on failing server, got nil")
+	}
+
+	calls := fakeCtrl.recordedCalls()
+	if len(calls) < 2 || calls[len(calls)-2] != "SuspendActor" || calls[len(calls)-1] != "DeleteActor" {
+		t.Errorf("recordedCalls must end with [SuspendActor, DeleteActor], got %v", calls)
+	}
+}
+
+func TestDiskShutdownSuspendsBeforeDelete(t *testing.T) {
+	fakeCtrl := &fakeControlClient{}
+	cfg := &userclass.Config{
+		APIStub: fakeCtrl,
+	}
+	du := newTestDiskUser(t, &fake.Server{}, cfg)
+
+	rt := &diskRuntime{cfg: du.cfg}
+	rt.users.Store(boomerutil.GoroutineID(), du)
+	rt.shutdown(context.Background())
+
+	calls := fakeCtrl.recordedCalls()
+	if len(calls) < 2 || calls[len(calls)-2] != "SuspendActor" || calls[len(calls)-1] != "DeleteActor" {
+		t.Errorf("recordedCalls must end with [SuspendActor, DeleteActor], got %v", calls)
+	}
+	reqs := fakeCtrl.recordedDeleteRequests()
+	if len(reqs) == 0 || !reqs[0].GetAnyState() {
+		t.Errorf("DeleteActor must set AnyState=true, got %v", reqs)
+	}
+}
+
+func TestDiskShutdownPausesBeforeDelete(t *testing.T) {
+	fakeCtrl := &fakeControlClient{}
+	cfg := &userclass.Config{
+		APIStub: fakeCtrl,
+		Dyn: dynconfig.NewHolder(dynconfig.Config{
+			LifecycleMode: dynconfig.LifecycleModePause,
+		}),
+	}
+	du := newTestDiskUser(t, &fake.Server{}, cfg)
+
+	rt := &diskRuntime{cfg: du.cfg}
+	rt.users.Store(boomerutil.GoroutineID(), du)
+	rt.shutdown(context.Background())
+
+	calls := fakeCtrl.recordedCalls()
+	if len(calls) < 2 || calls[len(calls)-2] != "PauseActor" || calls[len(calls)-1] != "DeleteActor" {
+		t.Errorf("recordedCalls must end with [PauseActor, DeleteActor], got %v", calls)
+	}
+	reqs := fakeCtrl.recordedDeleteRequests()
+	if len(reqs) == 0 || !reqs[0].GetAnyState() {
+		t.Errorf("DeleteActor must set AnyState=true, got %v", reqs)
 	}
 }

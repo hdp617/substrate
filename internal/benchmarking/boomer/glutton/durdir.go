@@ -163,8 +163,8 @@ type durDirUser struct {
 	userClass      string
 	expectedDigest string
 	expectedSize   int64
-	// Metric row names. DiskUser reuses this cycle against the rootfs upper
-	// with different names so dashboards do not mix DurableDir and rootfs.
+	// Metric row names for Locust/boomer stats. Set at construction so the
+	// cycle helpers stay free of DurDir-specific string literals.
 	metricWrite        string
 	metricServeInitial string
 	metricAfterResume  string
@@ -174,10 +174,6 @@ type durDirUser struct {
 
 func defaultDurDirMetrics() (write, initial, after, warm, overwrite string) {
 	return "DurDirWrite", "DurDirServeInitial", "DurDirServeAfterResume", "DurDirServeWarm", "DurDirOverwrite"
-}
-
-func defaultDiskMetrics() (write, initial, after, warm, overwrite string) {
-	return "WriteDisk", "ReadDiskInitial", "ReadDiskAfterResume", "ReadDiskWarm", "WriteDiskOverwrite"
 }
 
 func (u *durDirUser) ref() *ateapipb.ObjectRef {
