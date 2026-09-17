@@ -16,8 +16,11 @@ limitations under the License.
 
 # Micro-VM suspend/resume and storage benchmark suite
 
-**Status:** proposal. This document is the plan for a micro-VM-focused
-benchmark suite. It is not a description of something that already runs.
+**Status:** Phases 0–2 (dirty-size sweep scaffolding) are implemented.
+Phase 3 (virtio-blk A/B) remains blocked on a runtime prototype. Patterns
+beyond the size sweep (`many-small`, overwrite-rotate churn, RAM×disk
+Matrix D) are listed in the matrix but not yet wired as `tests.yaml`
+entries.
 
 The suite has two jobs, in this order:
 

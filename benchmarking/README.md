@@ -115,6 +115,22 @@ and state restoration latency when a durable directory is attached to the actor.
 * `DurDirServeWarm`: Subsequent read within the same active cycle (cached state baseline).
 * `DurDirOverwrite`: In-place file overwrite with checksum verification.
 
+### Rootfs Disk Benchmark (DiskUser)
+
+`DiskUser` is the same suspend/resume cycle as DurDir, pointed at the default
+`glutton` template's `/tmp/glutton` data dir. On micro-VM that directory is the
+host overlay rootfs upper, so the cycle measures how a dirty rootfs scales
+Full-snapshot suspend/resume. Select it with `--user-class disk` (or
+`file: /app/tests/disk.py` in automation). It reuses the DurDir flags
+(`--durdir-file-size-bytes`, `--durdir-read-mode`, `--resume-mode`,
+`--lifecycle-mode`); `--durdir-template` defaults to `glutton`.
+
+Reported rows: `WriteDisk`, `ReadDiskInitial`, `SuspendActor`/`PauseActor`,
+`ResumeActor`, `ReadDiskAfterResume`, `ReadDiskWarm`, `WriteDiskOverwrite`.
+
+See [docs/dev/microvm-benchmark-suite.md](../docs/dev/microvm-benchmark-suite.md)
+for the full micro-VM matrix.
+
 ### Viewing Traces
 You must have enabled otel tracing for your cluster to view traces.
 

@@ -30,6 +30,7 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/ch"
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/kata"
+	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/imagecache"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
@@ -362,6 +363,8 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	// which hid that a first (cold) restore and a later (warm) one differ by more
 	// than 5x on the same actor. upper/lowers is the host reassembling the rootfs;
 	// vm_restore is cloud-hypervisor reading guest RAM back.
+	dReadyz := time.Since(tResume)
+	dTotal := time.Since(tStart)
 	slog.InfoContext(ctx, "Actor restore phases", slog.String("id", actorUID),
 		slog.Duration("prep", tPrep.Sub(tStart)),
 		slog.Duration("bundles", tBundles.Sub(tPrep)),
@@ -372,8 +375,21 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 		slog.Duration("vmm_launch", tLaunch.Sub(tTap)),
 		slog.Duration("vm_restore", tVMRestore.Sub(tLaunch)),
 		slog.Duration("resume", tResume.Sub(tVMRestore)),
-		slog.Duration("readyz", time.Since(tResume)),
-		slog.Duration("total", time.Since(tStart)))
+		slog.Duration("readyz", dReadyz),
+		slog.Duration("total", dTotal))
+	s.metrics.recordRestore(ctx,
+		microVMPhase{ateattr.MicroVMRestorePhasePrep, tPrep.Sub(tStart)},
+		microVMPhase{ateattr.MicroVMRestorePhaseBundles, tBundles.Sub(tPrep)},
+		microVMPhase{ateattr.MicroVMRestorePhaseUpperJoin, tUpper.Sub(tBundles)},
+		microVMPhase{ateattr.MicroVMRestorePhaseLowers, tLowers.Sub(tUpper)},
+		microVMPhase{ateattr.MicroVMRestorePhaseDurable, tDurable.Sub(tLowers)},
+		microVMPhase{ateattr.MicroVMRestorePhaseTap, tTap.Sub(tDurable)},
+		microVMPhase{ateattr.MicroVMRestorePhaseVMMLaunch, tLaunch.Sub(tTap)},
+		microVMPhase{ateattr.MicroVMRestorePhaseVMRestore, tVMRestore.Sub(tLaunch)},
+		microVMPhase{ateattr.MicroVMRestorePhaseResume, tResume.Sub(tVMRestore)},
+		microVMPhase{ateattr.MicroVMRestorePhaseReadyz, dReadyz},
+		microVMPhase{ateattr.MicroVMRestorePhaseTotal, dTotal},
+	)
 
 	// An eager restore has read the whole snapshot into guest memory, and nothing
 	// merges against it afterwards, so the staged copy is dead weight from here on —

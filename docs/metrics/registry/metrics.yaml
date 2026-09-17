@@ -245,6 +245,97 @@ groups:
               value: total
               brief: The full operation. Use this value as the denominator. Do not add the phases together.
 
+  - id: registry.ate.microvm
+    type: attribute_group
+    brief: >
+      The phases of a micro-VM suspend or resume inside ateom-microvm. They
+      partition the ateom_checkpoint and ateom_restore steps of
+      ate.actor.checkpoint.duration and ate.actor.restore.duration. They do not
+      replace those steps. Only ateom-microvm emits them.
+    attributes:
+      - id: ate.microvm.checkpoint.phase
+        stability: development
+        brief: The step of a micro-VM checkpoint that ateom-microvm measured.
+        type:
+          members:
+            - id: pause
+              stability: development
+              value: pause
+              brief: Cloud Hypervisor pause of the guest.
+            - id: snapshot
+              stability: development
+              value: snapshot
+              brief: Cloud Hypervisor memory snapshot write.
+            - id: merge
+              stability: development
+              value: merge
+              brief: OnDemand delta merge into a complete memory-ranges image.
+            - id: durable_dir
+              stability: development
+              value: durable_dir
+              brief: Tar of DurableDir volumes.
+            - id: rootfs_upper
+              stability: development
+              value: rootfs_upper
+              brief: Tar of the host overlay rootfs uppers.
+            - id: teardown
+              stability: development
+              value: teardown
+              brief: VMM and virtiofsd teardown after the snapshot files are on disk.
+            - id: total
+              stability: development
+              value: total
+              brief: The full ateom checkpoint call. Do not add the phases together.
+      - id: ate.microvm.restore.phase
+        stability: development
+        brief: The step of a micro-VM restore that ateom-microvm measured.
+        type:
+          members:
+            - id: prep
+              stability: development
+              value: prep
+              brief: Path rewrite and VMDir setup before the rootfs is reassembled.
+            - id: bundles
+              stability: development
+              value: bundles
+              brief: OCI bundle preparation for each container.
+            - id: upper_join
+              stability: development
+              value: upper_join
+              brief: Wait for the background rootfs-upper untar.
+            - id: lowers
+              stability: development
+              value: lowers
+              brief: Host overlay mount and virtiofsd start.
+            - id: durable
+              stability: development
+              value: durable
+              brief: DurableDir share staging after the lowers.
+            - id: tap
+              stability: development
+              value: tap
+              brief: Rebuild of the actor tap devices.
+            - id: vmm_launch
+              stability: development
+              value: vmm_launch
+              brief: Cloud Hypervisor process launch for restore.
+            - id: vm_restore
+              stability: development
+              value: vm_restore
+              brief: Cloud Hypervisor guest RAM restore.
+            - id: resume
+              stability: development
+              value: resume
+              brief: Cloud Hypervisor resume of the restored guest.
+            - id: readyz
+              stability: development
+              value: readyz
+              brief: Wait for container readiness probes.
+            - id: total
+              stability: development
+              value: total
+              brief: The full ateom restore call. Do not add the phases together.
+
   - id: registry.ate.failure
     type: attribute_group
     brief: >
@@ -892,24 +983,77 @@ groups:
     instrument: histogram
     unit: By
     stability: development
-    brief: The size in bytes of each gVisor snapshot image that a checkpoint writes, before compression.
+    brief: The size in bytes of each snapshot image that a checkpoint writes, before compression.
     note: >
       atelet records one measurement for each image file. It does not record one
       measurement for each checkpoint. Use the file.name key to compare the same
-      type of image.
+      type of image. On gVisor the names are runsc images. On micro-VM they are
+      memory-ranges, rootfs-upper.tar, durable-dir.tar, and the Cloud Hypervisor
+      config and state files. ate.sandbox.class splits the two runtimes.
     annotations:
       substrate:
         emitted_by: [atelet]
         golden_signals: [saturation]
         code_anchor: cmd/atelet/main.go
         buckets: [1000000, 5000000, 10000000, 25000000, 50000000, 100000000, 250000000, 500000000, 1000000000, 2000000000, 5000000000, 10000000000]
-        cuj: The snapshots become larger. Which template, and which image?
+        cuj: The snapshots become larger. Which template, which image, and which sandbox class?
     attributes:
       - ref: file.name
         requirement_level: required
       - ref: ate.template.atespace
         requirement_level: required
       - ref: ate.template.name
+        requirement_level: required
+      - ref: ate.sandbox.class
+        requirement_level:
+          conditionally_required: The class is known from the on-node snapshot record.
+
+  - id: metric.ate.microvm.checkpoint.duration
+    type: metric
+    metric_name: ate.microvm.checkpoint.duration
+    instrument: histogram
+    unit: s
+    stability: development
+    brief: The time of one phase of a micro-VM actor checkpoint inside ateom-microvm.
+    note: >
+      These phases partition the ateom_checkpoint step of
+      ate.actor.checkpoint.duration. They do not replace it. A phase that did
+      not run is absent. It is not zero. The total phase is the denominator.
+      Do not add the phases together: the tars run at the same time as the
+      Cloud Hypervisor snapshot.
+    annotations:
+      substrate:
+        emitted_by: [ateom-microvm]
+        golden_signals: [latency]
+        code_anchor: cmd/ateom-microvm/metrics.go
+        buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60]
+        cuj: A micro-VM suspend is slow. Is the cause the guest pause, the memory snapshot, the OnDemand merge, a tar, or teardown?
+    attributes:
+      - ref: ate.microvm.checkpoint.phase
+        requirement_level: required
+
+  - id: metric.ate.microvm.restore.duration
+    type: metric
+    metric_name: ate.microvm.restore.duration
+    instrument: histogram
+    unit: s
+    stability: development
+    brief: The time of one phase of a micro-VM actor restore inside ateom-microvm.
+    note: >
+      These phases partition the ateom_restore step of
+      ate.actor.restore.duration. They do not replace it. A phase that did not
+      run is absent. It is not zero. The total phase is the denominator. Do not
+      add the phases together: the rootfs-upper untar overlaps bundle
+      preparation.
+    annotations:
+      substrate:
+        emitted_by: [ateom-microvm]
+        golden_signals: [latency]
+        code_anchor: cmd/ateom-microvm/metrics.go
+        buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60]
+        cuj: A micro-VM resume is slow. Is the cause the rootfs reassembly, virtiofsd, the VMM restore, or readyz?
+    attributes:
+      - ref: ate.microvm.restore.phase
         requirement_level: required
 
   - id: metric.ate.actor.stats.cpu.time
@@ -1188,8 +1332,9 @@ groups:
     brief: The time, the rate and the errors of each gRPC method on the server.
     note: >
       The otelgrpc interceptor sends this instrument. The code of Substrate does
-      not make it. This instrument is the only instrumentation of ateom. ateom
-      has it on the gRPC interface that atelet calls.
+      not make it. ateom-gvisor has only this instrument. ateom-microvm also
+      emits ate.microvm.checkpoint.duration and ate.microvm.restore.duration.
+      Both ateoms have the gRPC interceptor on the interface that atelet calls.
     annotations:
       substrate:
         emitted_by: [ateapi, atelet, atenet-router, ateom-gvisor, ateom-microvm]

@@ -31,7 +31,19 @@ import (
 	gluttonpb "github.com/agent-substrate/substrate/internal/proto/glutton"
 )
 
-func TestDurDirLoopSequence(t *testing.T) {
+func newTestDiskUser(t *testing.T, srv *fake.Server, cfg *userclass.Config) *diskUser {
+	t.Helper()
+	c := newTestConfig(t, srv, cfg)
+	return &diskUser{
+		cfg:          c,
+		actorName:    "diskactor",
+		templateName: defaultDiskTemplate,
+		userClass:    diskUserClass,
+		expectedSize: int64(len(srv.Data)),
+	}
+}
+
+func TestDiskLoopSequence(t *testing.T) {
 	tests := []struct {
 		name          string
 		resumeMode    string
@@ -71,7 +83,7 @@ func TestDurDirLoopSequence(t *testing.T) {
 					LifecycleMode: tc.lifecycleMode,
 				}),
 			}
-			du := newTestDurDirUser(t, srv, cfg)
+			du := newTestDiskUser(t, srv, cfg)
 			du.expectedDigest = srv.HexDigest()
 
 			dynCfg := cfg.Dyn.Load()
@@ -87,10 +99,10 @@ func TestDurDirLoopSequence(t *testing.T) {
 	}
 }
 
-func TestDurDirUsesConfiguredFileSize(t *testing.T) {
+func TestDiskUsesConfiguredFileSize(t *testing.T) {
 	configuredSize := int64(1048576) // 1 MiB
 	srv := &fake.Server{Data: make([]byte, configuredSize)}
-	du := newTestDurDirUser(t, srv, nil)
+	du := newTestDiskUser(t, srv, nil)
 
 	if err := du.writeDisk(context.Background(), "TestConfiguredSize", configuredSize, gluttonpb.WriteMode_WRITE_MODE_TRUNCATE); err != nil {
 		t.Fatalf("writeDisk failed: %v", err)
@@ -105,18 +117,40 @@ func TestDurDirUsesConfiguredFileSize(t *testing.T) {
 	}
 }
 
-func TestDurDirTestFileIsAValidGluttonKey(t *testing.T) {
-	if !regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString(durDirTestFile) {
-		t.Fatalf("durDirTestFile %q would be rejected by glutton", durDirTestFile)
+// TestDiskAcceptsSizeBeyondOldInt32Ceiling exercises the WriteDiskRequest.size
+// widening to int64: a size above the old int32 max (2 GiB) must marshal onto
+// the wire without truncation or overflow. The fake server always reports
+// len(Data) back, so a real byte buffer of this size is not needed; only the
+// outgoing wire value under test is checked, and the (expected) response-size
+// mismatch error is ignored.
+func TestDiskAcceptsSizeBeyondOldInt32Ceiling(t *testing.T) {
+	beyondInt32 := int64(1) << 32 // 4 GiB
+	srv := &fake.Server{}
+	du := newTestDiskUser(t, srv, nil)
+
+	_ = du.writeDisk(context.Background(), t.Name(), beyondInt32, gluttonpb.WriteMode_WRITE_MODE_TRUNCATE)
+
+	recorded := srv.RecordedWriteSizes()
+	if len(recorded) != 1 {
+		t.Fatalf("recorded write sizes: got %d calls, want 1", len(recorded))
+	}
+	if recorded[0] != beyondInt32 {
+		t.Errorf("WriteDisk received size %d, want %d", recorded[0], beyondInt32)
 	}
 }
 
-func TestDurDirDigestOnlyAcceptsEmptyPayload(t *testing.T) {
+func TestDiskTestFileIsAValidGluttonKey(t *testing.T) {
+	if !regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString(diskTestFile) {
+		t.Fatalf("diskTestFile %q would be rejected by glutton", diskTestFile)
+	}
+}
+
+func TestDiskDigestOnlyAcceptsEmptyPayload(t *testing.T) {
 	srv := &fake.Server{
 		Data:         make([]byte, 1024),
 		EmptyPayload: true,
 	}
-	du := newTestDurDirUser(t, srv, nil)
+	du := newTestDiskUser(t, srv, nil)
 	du.expectedDigest = srv.HexDigest()
 
 	if err := du.readDisk(context.Background(), t.Name(), gluttonpb.ReadMode_READ_MODE_DIGEST_ONLY); err != nil {
@@ -124,12 +158,12 @@ func TestDurDirDigestOnlyAcceptsEmptyPayload(t *testing.T) {
 	}
 }
 
-func TestDurDirDataModeRejectsEmptyPayload(t *testing.T) {
+func TestDiskDataModeRejectsEmptyPayload(t *testing.T) {
 	srv := &fake.Server{
 		Data:         make([]byte, 1024),
 		EmptyPayload: true,
 	}
-	du := newTestDurDirUser(t, srv, nil)
+	du := newTestDiskUser(t, srv, nil)
 	du.expectedDigest = srv.HexDigest()
 
 	if err := du.readDisk(context.Background(), t.Name(), gluttonpb.ReadMode_READ_MODE_DATA); err == nil {
@@ -137,14 +171,14 @@ func TestDurDirDataModeRejectsEmptyPayload(t *testing.T) {
 	}
 }
 
-func TestDurDirDigestOnlyStillRejectsWrongDigest(t *testing.T) {
+func TestDiskDigestOnlyStillRejectsWrongDigest(t *testing.T) {
 	wrongHash := sha256.Sum256([]byte("wrong data"))
 	srv := &fake.Server{
 		Data:         make([]byte, 1024),
 		Digest:       wrongHash[:],
 		EmptyPayload: true,
 	}
-	du := newTestDurDirUser(t, srv, nil)
+	du := newTestDiskUser(t, srv, nil)
 	h := sha256.Sum256(srv.Data)
 	du.expectedDigest = hex.EncodeToString(h[:])
 
@@ -153,9 +187,9 @@ func TestDurDirDigestOnlyStillRejectsWrongDigest(t *testing.T) {
 	}
 }
 
-func TestDurDirReadModeSentOnWire(t *testing.T) {
+func TestDiskReadModeSentOnWire(t *testing.T) {
 	srv := &fake.Server{}
-	du := newTestDurDirUser(t, srv, nil)
+	du := newTestDiskUser(t, srv, nil)
 	du.expectedDigest = srv.HexDigest()
 
 	if err := du.readDisk(context.Background(), t.Name(), gluttonpb.ReadMode_READ_MODE_DIGEST_ONLY); err != nil {
@@ -171,7 +205,7 @@ func TestDurDirReadModeSentOnWire(t *testing.T) {
 	}
 }
 
-func TestDurDirBootstrapUsesConfiguredResumeMode(t *testing.T) {
+func TestDiskBootstrapUsesConfiguredResumeMode(t *testing.T) {
 	tests := []struct {
 		name            string
 		resumeMode      string
@@ -201,7 +235,7 @@ func TestDurDirBootstrapUsesConfiguredResumeMode(t *testing.T) {
 				}),
 			})
 
-			rt := &durDirRuntime{cfg: cfg}
+			rt := &diskRuntime{cfg: cfg}
 			_, err := rt.startUser(context.Background(), cfg.Dyn.Load())
 			if err != nil {
 				t.Fatalf("startUser failed: %v", err)
@@ -216,7 +250,7 @@ func TestDurDirBootstrapUsesConfiguredResumeMode(t *testing.T) {
 	}
 }
 
-func TestDurDirBootstrapFailureSuspendsBeforeDelete(t *testing.T) {
+func TestDiskBootstrapFailureSuspendsBeforeDelete(t *testing.T) {
 	srv := &fake.Server{Status: http.StatusInternalServerError}
 	fakeCtrl := &fakeControlClient{}
 	cfg := newTestConfig(t, srv, &userclass.Config{
@@ -227,7 +261,7 @@ func TestDurDirBootstrapFailureSuspendsBeforeDelete(t *testing.T) {
 		}),
 	})
 
-	rt := &durDirRuntime{cfg: cfg}
+	rt := &diskRuntime{cfg: cfg}
 	_, err := rt.startUser(context.Background(), cfg.Dyn.Load())
 	if err == nil {
 		t.Fatalf("startUser expected error on failing server, got nil")
@@ -239,14 +273,14 @@ func TestDurDirBootstrapFailureSuspendsBeforeDelete(t *testing.T) {
 	}
 }
 
-func TestDurDirShutdownSuspendsBeforeDelete(t *testing.T) {
+func TestDiskShutdownSuspendsBeforeDelete(t *testing.T) {
 	fakeCtrl := &fakeControlClient{}
 	cfg := &userclass.Config{
 		APIStub: fakeCtrl,
 	}
-	du := newTestDurDirUser(t, &fake.Server{}, cfg)
+	du := newTestDiskUser(t, &fake.Server{}, cfg)
 
-	rt := &durDirRuntime{cfg: du.cfg}
+	rt := &diskRuntime{cfg: du.cfg}
 	rt.users.Store(boomerutil.GoroutineID(), du)
 	rt.shutdown(context.Background())
 
@@ -260,7 +294,7 @@ func TestDurDirShutdownSuspendsBeforeDelete(t *testing.T) {
 	}
 }
 
-func TestDurDirShutdownPausesBeforeDelete(t *testing.T) {
+func TestDiskShutdownPausesBeforeDelete(t *testing.T) {
 	fakeCtrl := &fakeControlClient{}
 	cfg := &userclass.Config{
 		APIStub: fakeCtrl,
@@ -268,9 +302,9 @@ func TestDurDirShutdownPausesBeforeDelete(t *testing.T) {
 			LifecycleMode: dynconfig.LifecycleModePause,
 		}),
 	}
-	du := newTestDurDirUser(t, &fake.Server{}, cfg)
+	du := newTestDiskUser(t, &fake.Server{}, cfg)
 
-	rt := &durDirRuntime{cfg: du.cfg}
+	rt := &diskRuntime{cfg: du.cfg}
 	rt.users.Store(boomerutil.GoroutineID(), du)
 	rt.shutdown(context.Background())
 

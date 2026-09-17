@@ -139,22 +139,24 @@ func ActorStateValue(state ateapipb.ActorState) string {
 // pool is node state every actor shares. For the same reason it is the only
 // ate.* label on its counter.
 const (
-	ActorOperationNameKey   = attribute.Key("ate.actor.operation.name")
-	WorkerPoolNamespaceKey  = attribute.Key("ate.workerpool.namespace")
-	WorkerPoolNameKey       = attribute.Key("ate.workerpool.name")
-	WorkerStateKey          = attribute.Key("ate.worker.state")
-	SandboxClassKey         = attribute.Key("ate.sandbox.class")
-	SnapshotKindKey         = attribute.Key("ate.snapshot.kind")
-	SnapshotScopeKey        = attribute.Key("ate.snapshot.scope")
-	SnapshotPhaseKey        = attribute.Key("ate.snapshot.phase")
-	ImageCacheOutcomeKey    = attribute.Key("ate.imagecache.outcome")
-	SchedulerOutcomeKey     = attribute.Key("ate.scheduler.outcome")
-	SchedulingConstraintKey = attribute.Key("ate.scheduling.constraint")
-	RouterResumeKey         = attribute.Key("ate.router.resume")
-	RouterOutcomeKey        = attribute.Key("ate.router.outcome")
-	FailureReasonKey        = attribute.Key("ate.failure.reason")
-	FailureDomainKey        = attribute.Key("ate.failure.domain")
-	StatsSourceKey          = attribute.Key("ate.stats.source")
+	ActorOperationNameKey     = attribute.Key("ate.actor.operation.name")
+	WorkerPoolNamespaceKey    = attribute.Key("ate.workerpool.namespace")
+	WorkerPoolNameKey         = attribute.Key("ate.workerpool.name")
+	WorkerStateKey            = attribute.Key("ate.worker.state")
+	SandboxClassKey           = attribute.Key("ate.sandbox.class")
+	SnapshotKindKey           = attribute.Key("ate.snapshot.kind")
+	SnapshotScopeKey          = attribute.Key("ate.snapshot.scope")
+	SnapshotPhaseKey          = attribute.Key("ate.snapshot.phase")
+	MicroVMCheckpointPhaseKey = attribute.Key("ate.microvm.checkpoint.phase")
+	MicroVMRestorePhaseKey    = attribute.Key("ate.microvm.restore.phase")
+	ImageCacheOutcomeKey      = attribute.Key("ate.imagecache.outcome")
+	SchedulerOutcomeKey       = attribute.Key("ate.scheduler.outcome")
+	SchedulingConstraintKey   = attribute.Key("ate.scheduling.constraint")
+	RouterResumeKey           = attribute.Key("ate.router.resume")
+	RouterOutcomeKey          = attribute.Key("ate.router.outcome")
+	FailureReasonKey          = attribute.Key("ate.failure.reason")
+	FailureDomainKey          = attribute.Key("ate.failure.domain")
+	StatsSourceKey            = attribute.Key("ate.stats.source")
 )
 
 // Values for FailureDomainKey. A strict function of the reason, so it costs no
@@ -360,6 +362,37 @@ const (
 	// for local); SnapshotKindKey already says which.
 	SnapshotPhasePersist = "persist"
 	SnapshotPhaseTotal   = "total"
+)
+
+// Values for MicroVMCheckpointPhaseKey. Emitted only by ateom-microvm; they
+// partition the ateom_checkpoint atelet phase so a slow suspend can be blamed
+// on the guest pause, the Cloud Hypervisor snapshot, the OnDemand merge, a
+// tar, or teardown. Phases that did not run are absent, not zero.
+const (
+	MicroVMCheckpointPhasePause       = "pause"
+	MicroVMCheckpointPhaseSnapshot    = "snapshot"
+	MicroVMCheckpointPhaseMerge       = "merge"
+	MicroVMCheckpointPhaseDurableDir  = "durable_dir"
+	MicroVMCheckpointPhaseRootfsUpper = "rootfs_upper"
+	MicroVMCheckpointPhaseTeardown    = "teardown"
+	MicroVMCheckpointPhaseTotal       = "total"
+)
+
+// Values for MicroVMRestorePhaseKey. Emitted only by ateom-microvm; they
+// partition the ateom_restore atelet phase. upper_join is the wait for the
+// background rootfs-upper untar; lowers is overlay mount + virtiofsd start.
+const (
+	MicroVMRestorePhasePrep      = "prep"
+	MicroVMRestorePhaseBundles   = "bundles"
+	MicroVMRestorePhaseUpperJoin = "upper_join"
+	MicroVMRestorePhaseLowers    = "lowers"
+	MicroVMRestorePhaseDurable   = "durable"
+	MicroVMRestorePhaseTap       = "tap"
+	MicroVMRestorePhaseVMMLaunch = "vmm_launch"
+	MicroVMRestorePhaseVMRestore = "vm_restore"
+	MicroVMRestorePhaseResume    = "resume"
+	MicroVMRestorePhaseReadyz    = "readyz"
+	MicroVMRestorePhaseTotal     = "total"
 )
 
 // FailureReason classifies err onto the bounded ateerrors taxonomy, reading the

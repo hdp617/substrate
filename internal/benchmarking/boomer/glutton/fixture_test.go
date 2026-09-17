@@ -114,11 +114,13 @@ func newTestConfig(t *testing.T, srv *fake.Server, cfg *userclass.Config) *userc
 func newTestDurDirUser(t *testing.T, srv *fake.Server, cfg *userclass.Config) *durDirUser {
 	t.Helper()
 	c := newTestConfig(t, srv, cfg)
-	return &durDirUser{
+	u := &durDirUser{
 		cfg:          c,
 		actorName:    "duractor",
 		templateName: defaultDurTemplate,
 		userClass:    durDirUserClass,
 		expectedSize: int64(len(srv.Data)),
 	}
+	u.metricWrite, u.metricServeInitial, u.metricAfterResume, u.metricWarm, u.metricOverwrite = defaultDurDirMetrics()
+	return u
 }

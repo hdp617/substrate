@@ -110,7 +110,7 @@ message WriteDiskRequest {
   string key = 1;
 
   // size of bytes to be written
-  int32 size = 2;
+  int64 size = 2;
 
   WriteMode write_mode = 3;
 }

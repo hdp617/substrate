@@ -53,6 +53,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/version"
 	"github.com/vishvananda/netns"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -154,6 +155,11 @@ func do(ctx context.Context) error {
 		serverboot.Fatal(ctx, "Failed to initialize metrics", err)
 	}
 	defer serverboot.ShutdownProvider("MeterProvider", mp.Shutdown)
+
+	microVMMetrics, err := NewInstruments(otel.Meter(serviceName))
+	if err != nil {
+		return fmt.Errorf("while creating micro-VM metrics: %w", err)
+	}
 
 	// Create ateom dir.
 	ateomDir := ateompath.AteomPath(*podUID)
@@ -258,6 +264,7 @@ func do(ctx context.Context) error {
 	slog.InfoContext(ctx, "atunnel egress serving", slog.String("address", *atunnelEgressListenAddress))
 
 	ateomService := NewService(*podUID, *chBinary, *kataConfig, *kataDebug, *vmmMemReserve, interiorNetNS, actorLogger, atunnelIngress, atunnelEgress, atunnelEgressPort, *workerCredentialBundle, *podIdentityTrustBundle, *egressGatewayTrustBundle)
+	ateomService.metrics = microVMMetrics
 
 	svr := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
@@ -488,6 +495,10 @@ type AteomService struct {
 	// running for the agent client the way a lifecycle RPC does. Written under
 	// lock like every other transition; the atomic is for the reader.
 	guestStats atomic.Pointer[guestStatsTarget]
+
+	// metrics holds the suspend/resume phase histograms. Nil is a valid no-op
+	// (tests that construct AteomService by hand leave it unset).
+	metrics *Instruments
 }
 
 var _ ateompb.AteomServer = (*AteomService)(nil)

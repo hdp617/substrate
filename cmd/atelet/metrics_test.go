@@ -18,12 +18,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 
 	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/ateerrors"
@@ -483,5 +487,73 @@ func TestCheckpointSnapshotKind(t *testing.T) {
 				t.Errorf("checkpointSnapshotKind() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRecordSnapshotSizeIncludesSandboxClass(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	h, err := mp.Meter("atelet").Int64Histogram(
+		"atelet.snapshot.size",
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		t.Fatalf("Int64Histogram: %v", err)
+	}
+	prev := snapshotSizeBytes
+	snapshotSizeBytes = h
+	t.Cleanup(func() { snapshotSizeBytes = prev })
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rootfs-upper.tar")
+	if err := os.WriteFile(path, []byte("snapshot-bytes"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	recordSnapshotSize(context.Background(), "rootfs-upper.tar", path, testTemplateNamespace, testTemplateName, "microvm")
+
+	m := collectHistogram(t, reader, "atelet.snapshot.size")
+	hist, ok := m.Data.(metricdata.Histogram[int64])
+	if !ok {
+		t.Fatalf("%s is %T, want int64 histogram", m.Name, m.Data)
+	}
+	if len(hist.DataPoints) != 1 {
+		t.Fatalf("datapoints = %d, want 1", len(hist.DataPoints))
+	}
+	attrs := hist.DataPoints[0].Attributes
+	if got := attrString(t, attrs, semconv.FileNameKey); got != "rootfs-upper.tar" {
+		t.Errorf("file.name = %q, want rootfs-upper.tar", got)
+	}
+	if got := attrString(t, attrs, ateattr.SandboxClassKey); got != "microvm" {
+		t.Errorf("ate.sandbox.class = %q, want microvm", got)
+	}
+	if got := attrString(t, attrs, ateattr.TemplateNameKey); got != testTemplateName {
+		t.Errorf("ate.template.name = %q, want %q", got, testTemplateName)
+	}
+}
+
+func TestRecordSnapshotSizeOmitsEmptySandboxClass(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	h, err := mp.Meter("atelet").Int64Histogram("atelet.snapshot.size", metric.WithUnit("By"))
+	if err != nil {
+		t.Fatalf("Int64Histogram: %v", err)
+	}
+	prev := snapshotSizeBytes
+	snapshotSizeBytes = h
+	t.Cleanup(func() { snapshotSizeBytes = prev })
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "memory-ranges")
+	if err := os.WriteFile(path, []byte("mem"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	recordSnapshotSize(context.Background(), "memory-ranges", path, testTemplateNamespace, testTemplateName, "")
+
+	m := collectHistogram(t, reader, "atelet.snapshot.size")
+	hist := m.Data.(metricdata.Histogram[int64])
+	if _, ok := hist.DataPoints[0].Attributes.Value(ateattr.SandboxClassKey); ok {
+		t.Error("empty sandbox class must be omitted, not recorded as unknown")
 	}
 }

@@ -235,7 +235,7 @@ func (s *Service) WriteDisk(ctx context.Context, req *gluttonpb.WriteDiskRequest
 	defer f.Close()
 
 	h := sha256.New()
-	size := int64(req.GetSize())
+	size := req.GetSize()
 	if err := streamRandomBytes(io.MultiWriter(f, h), size); err != nil {
 		return nil, status.Errorf(codes.Internal, "write %s: %v", path, err)
 	}
@@ -251,7 +251,7 @@ func (s *Service) WriteDisk(ctx context.Context, req *gluttonpb.WriteDiskRequest
 		size += tail
 	}
 
-	s.diskWriteBytes.Add(ctx, int64(req.GetSize()))
+	s.diskWriteBytes.Add(ctx, req.GetSize())
 	return &gluttonpb.WriteDiskResponse{Size: size, Sha256: h.Sum(nil)}, nil
 }
 

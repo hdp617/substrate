@@ -568,6 +568,304 @@ tests:
       - "1.0"
       - "--max-wait-time"
       - "1.0"
+  # ---- micro-VM suspend/resume suite (docs/dev/microvm-benchmark-suite.md) ----
+  # Phase 1: parity with gVisor baselines, plus an 8 MiB rootfs-upper cycle.
+  - name: microvm_glutton_baseline
+    type: locust
+    description: "micro-VM empty-actor suspend/resume floor: 1 user, 1 minute"
+    targetCluster: dev
+    file: /app/tests/glutton.py
+    duration: 1m
+    users: 1
+    workerCount: 1
+    sandboxClass: microvm
+    flags:
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
+  - name: microvm_glutton_baseline_pause
+    type: locust
+    description: "micro-VM empty-actor pause/resume floor: 1 user, 1 minute"
+    targetCluster: dev
+    file: /app/tests/glutton.py
+    duration: 1m
+    users: 1
+    workerCount: 1
+    sandboxClass: microvm
+    flags:
+      - "--lifecycle-mode"
+      - "pause"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
+  - name: microvm_durdir_data_baseline
+    type: locust
+    description: "micro-VM DurDir data-scope: 1 user, 8 MiB file, explicit resume"
+    targetCluster: dev
+    file: /app/tests/durdir.py
+    duration: 1m
+    users: 1
+    workerCount: 1
+    sandboxClass: microvm
+    flags:
+      - "--durdir-template"
+      - "glutton-durdir-data"
+      - "--resume-mode"
+      - "explicit"
+      - "--durdir-file-size-bytes"
+      - "8388608"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
+  - name: microvm_durdir_full_baseline
+    type: locust
+    description: "micro-VM DurDir full-scope: 1 user, 8 MiB file, full memory restore"
+    targetCluster: dev
+    file: /app/tests/durdir.py
+    duration: 1m
+    users: 1
+    workerCount: 1
+    sandboxClass: microvm
+    flags:
+      - "--durdir-template"
+      - "glutton-durdir-full"
+      - "--resume-mode"
+      - "explicit"
+      - "--durdir-file-size-bytes"
+      - "8388608"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
+  - name: microvm_rootfs_8m
+    type: locust
+    description: "micro-VM rootfs-upper Full cycle: 8 MiB dirty rootfs via DiskUser"
+    targetCluster: dev
+    file: /app/tests/disk.py
+    duration: 1m
+    users: 1
+    workerCount: 1
+    sandboxClass: microvm
+    flags:
+      - "--durdir-template"
+      - "glutton"
+      - "--resume-mode"
+      - "explicit"
+      - "--durdir-read-mode"
+      - "digest"
+      - "--durdir-file-size-bytes"
+      - "8388608"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
+  - name: microvm_rootfs_8m_pause
+    type: locust
+    description: "micro-VM rootfs-upper pause cycle: 8 MiB dirty rootfs"
+    targetCluster: dev
+    file: /app/tests/disk.py
+    duration: 1m
+    users: 1
+    workerCount: 1
+    sandboxClass: microvm
+    flags:
+      - "--durdir-template"
+      - "glutton"
+      - "--lifecycle-mode"
+      - "pause"
+      - "--resume-mode"
+      - "explicit"
+      - "--durdir-read-mode"
+      - "digest"
+      - "--durdir-file-size-bytes"
+      - "8388608"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
+  # Phase 2: dirty-size sweep (rootfs upper and DurableDir Full).
+  - name: microvm_rootfs_64m
+    type: locust
+    description: "micro-VM rootfs-upper Full cycle: 64 MiB dirty rootfs"
+    targetCluster: dev
+    file: /app/tests/disk.py
+    duration: 1m
+    users: 1
+    workerCount: 1
+    sandboxClass: microvm
+    flags:
+      - "--durdir-template"
+      - "glutton"
+      - "--resume-mode"
+      - "explicit"
+      - "--durdir-read-mode"
+      - "digest"
+      - "--durdir-file-size-bytes"
+      - "67108864"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
+  - name: microvm_rootfs_256m
+    type: locust
+    description: "micro-VM rootfs-upper Full cycle: 256 MiB dirty rootfs"
+    targetCluster: dev
+    file: /app/tests/disk.py
+    duration: 1m
+    users: 1
+    workerCount: 1
+    sandboxClass: microvm
+    flags:
+      - "--durdir-template"
+      - "glutton"
+      - "--resume-mode"
+      - "explicit"
+      - "--durdir-read-mode"
+      - "digest"
+      - "--durdir-file-size-bytes"
+      - "268435456"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
+  - name: microvm_rootfs_1g
+    type: locust
+    description: "micro-VM rootfs-upper Full cycle: 1 GiB dirty rootfs"
+    targetCluster: dev
+    file: /app/tests/disk.py
+    duration: 2m
+    users: 1
+    workerCount: 1
+    sandboxClass: microvm
+    actorMemory: "1536Mi"
+    flags:
+      - "--durdir-template"
+      - "glutton"
+      - "--resume-mode"
+      - "explicit"
+      - "--durdir-read-mode"
+      - "digest"
+      - "--durdir-file-size-bytes"
+      - "1073741824"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
+  - name: microvm_durdir_full_64m
+    type: locust
+    description: "micro-VM DurDir full-scope: 64 MiB file"
+    targetCluster: dev
+    file: /app/tests/durdir.py
+    duration: 1m
+    users: 1
+    workerCount: 1
+    sandboxClass: microvm
+    flags:
+      - "--durdir-template"
+      - "glutton-durdir-full"
+      - "--resume-mode"
+      - "explicit"
+      - "--durdir-read-mode"
+      - "digest"
+      - "--durdir-file-size-bytes"
+      - "67108864"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
+  - name: microvm_durdir_full_256m
+    type: locust
+    description: "micro-VM DurDir full-scope: 256 MiB file"
+    targetCluster: dev
+    file: /app/tests/durdir.py
+    duration: 1m
+    users: 1
+    workerCount: 1
+    sandboxClass: microvm
+    flags:
+      - "--durdir-template"
+      - "glutton-durdir-full"
+      - "--resume-mode"
+      - "explicit"
+      - "--durdir-read-mode"
+      - "digest"
+      - "--durdir-file-size-bytes"
+      - "268435456"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
+  - name: microvm_durdir_full_1g
+    type: locust
+    description: "micro-VM DurDir full-scope: 1 GiB file"
+    targetCluster: dev
+    file: /app/tests/durdir.py
+    duration: 2m
+    users: 1
+    workerCount: 1
+    sandboxClass: microvm
+    actorMemory: "1536Mi"
+    flags:
+      - "--durdir-template"
+      - "glutton-durdir-full"
+      - "--resume-mode"
+      - "explicit"
+      - "--durdir-read-mode"
+      - "digest"
+      - "--durdir-file-size-bytes"
+      - "1073741824"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
+  - name: microvm_glutton_baseline_implicit
+    type: locust
+    description: "micro-VM empty-actor implicit (router) resume: 1 user"
+    targetCluster: dev
+    file: /app/tests/disk.py
+    duration: 1m
+    users: 1
+    workerCount: 1
+    sandboxClass: microvm
+    flags:
+      - "--durdir-template"
+      - "glutton"
+      - "--resume-mode"
+      - "implicit"
+      - "--durdir-read-mode"
+      - "digest"
+      - "--durdir-file-size-bytes"
+      - "8388608"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
+  - name: glutton_mem_1gi_microvm_pause
+    type: locust
+    description: "Large-memory (pause): 1Gi resident working set, microvm"
+    targetCluster: dev
+    file: /app/tests/glutton.py
+    duration: 1m
+    users: 1
+    workerCount: 1
+    sandboxClass: microvm
+    actorMemory: "1536Mi"
+    flags:
+      - "--lifecycle-mode"
+      - "pause"
+      - "--mem-target"
+      - "1Gi"
+      - "--mem-churn"
+      - "64Mi"
+      - "--mem-read"
+      - "all"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
   - name: ingress_routercap_envoy_2cpu
     description: "Router capacity: Nighthawk adaptive max-RPS search under a 25ms tail-latency SLO, Envoy at 2 CPUs"
     type: nighthawk-ingress

@@ -351,7 +351,7 @@ type WriteDiskRequest struct {
 	// name of the file to be written to
 	Key string `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
 	// size of bytes to be written
-	Size          int32     `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
+	Size          int64     `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
 	WriteMode     WriteMode `protobuf:"varint,3,opt,name=write_mode,json=writeMode,proto3,enum=glutton.WriteMode" json:"write_mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -394,7 +394,7 @@ func (x *WriteDiskRequest) GetKey() string {
 	return ""
 }
 
-func (x *WriteDiskRequest) GetSize() int32 {
+func (x *WriteDiskRequest) GetSize() int64 {
 	if x != nil {
 		return x.Size
 	}
@@ -900,7 +900,7 @@ const file_glutton_proto_rawDesc = "" +
 	"\bchecksum\x18\x02 \x01(\rR\bchecksum\"k\n" +
 	"\x10WriteDiskRequest\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x12\n" +
-	"\x04size\x18\x02 \x01(\x05R\x04size\x121\n" +
+	"\x04size\x18\x02 \x01(\x03R\x04size\x121\n" +
 	"\n" +
 	"write_mode\x18\x03 \x01(\x0e2\x12.glutton.WriteModeR\twriteMode\"?\n" +
 	"\x11WriteDiskResponse\x12\x12\n" +

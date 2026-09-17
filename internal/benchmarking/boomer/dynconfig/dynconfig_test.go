@@ -68,6 +68,18 @@ func TestParseValid(t *testing.T) {
 	}
 }
 
+// A file size beyond the old int32 WriteDiskRequest.Size ceiling (2 GiB)
+// must now parse, since glutton's wire type is int64.
+func TestParseAcceptsFileSizeBeyondOldInt32Ceiling(t *testing.T) {
+	cfg, err := Parse([]byte(`{"durdir_file_size_bytes": 2147483648}`), Config{})
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if cfg.DurDirFileSize != 2147483648 {
+		t.Errorf("DurDirFileSize: got %d, want 2147483648", cfg.DurDirFileSize)
+	}
+}
+
 func TestParseInvalidValues(t *testing.T) {
 	tests := []struct {
 		name string
@@ -98,8 +110,8 @@ func TestParseInvalidValues(t *testing.T) {
 			json: `{"durdir_file_size_bytes": -100}`,
 		},
 		{
-			name: "file size exceeds 2 GiB",
-			json: `{"durdir_file_size_bytes": 2147483648}`,
+			name: "file size exceeds 16 GiB",
+			json: `{"durdir_file_size_bytes": 17179869185}`,
 		},
 		{
 			name: "invalid resume mode",
