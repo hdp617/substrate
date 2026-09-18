@@ -8,6 +8,12 @@ and if the collector can accept it. To make a measurement, read
 [telemetry/README.md](telemetry/README.md). For the prerequisites and the
 scenario ladder, read [observability.md](observability.md).
 
+The Locust tests below are gVisor-first; only the large-memory Glutton
+entries set `sandboxClass: microvm`. The plan for a micro-VM suspend/resume
+suite, including the measurements needed to choose virtio-fs versus
+virtio-blk for actor-writable storage, is
+[docs/dev/microvm-benchmark-suite.md](../docs/dev/microvm-benchmark-suite.md).
+
 ## Deploy benchmarks
 
 > [!IMPORTANT]

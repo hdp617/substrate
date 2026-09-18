@@ -14,7 +14,9 @@ Complete the
 README first — it covers the base tooling and the default (gVisor) path this
 guide builds on. For background on the runtime, see
 [architecture.md](../architecture.md) and
-[hack/microvm-assets/README.md](../../hack/microvm-assets/README.md).
+[hack/microvm-assets/README.md](../../hack/microvm-assets/README.md). The
+plan for measuring suspend/resume and comparing virtio-fs with virtio-blk
+is [microvm-benchmark-suite.md](microvm-benchmark-suite.md).
 
 ## Option A: Linux host with KVM
 
