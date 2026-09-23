@@ -555,6 +555,28 @@ func TestScriptEnvKindProfile(t *testing.T) {
 	if env["KO_DOCKER_REPO"] != "localhost:5001" {
 		t.Errorf("ScriptEnv()[KO_DOCKER_REPO] = %q, want localhost:5001", env["KO_DOCKER_REPO"])
 	}
+	if env["NO_DEV_ENV"] != "true" {
+		t.Errorf("ScriptEnv()[NO_DEV_ENV] = %q, want true", env["NO_DEV_ENV"])
+	}
+}
+
+func TestScriptEnvNoDevEnvFlagReachesTheScripts(t *testing.T) {
+	loadEnv(t)
+	// The flag rather than the variable, which the scripts would inherit on
+	// their own. A script that sourced .ate-dev-env.sh anyway would take that
+	// file's BUCKET_NAME, staging the micro-VM assets somewhere other than the
+	// bucket the SandboxConfig applied beside them names.
+	t.Setenv("NO_DEV_ENV", "")
+
+	cfg, err := Load(Options{NoDevEnv: true})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	env := scriptEnvMap(t, cfg)
+	if env["NO_DEV_ENV"] != "true" {
+		t.Errorf("ScriptEnv()[NO_DEV_ENV] = %q, want true", env["NO_DEV_ENV"])
+	}
 }
 
 func TestSourceShellEnv(t *testing.T) {

@@ -75,6 +75,11 @@ type Config struct {
 	// Kind selects the local Kind install profile (ATE_INSTALL_KIND).
 	Kind bool
 
+	// NoDevEnv records that .ate-dev-env.sh was not sourced, whether because
+	// of --no-dev-env, NO_DEV_ENV, or the Kind profile. ScriptEnv passes it on
+	// so the scripts skip the file too.
+	NoDevEnv bool
+
 	// Namespace is the namespace the control plane is installed into, from
 	// ATE_NAMESPACE. It defaults to the canonical installdefaults.SystemNamespace,
 	// so an install that does not set it is unaffected. The checked-in manifests
@@ -256,7 +261,8 @@ func Load(opts Options) (*Config, error) {
 	// Sourcing is skipped for Kind installs the same way the shell kind installer
 	// exports NO_DEV_ENV: the GKE-shaped variables in a developer's file would
 	// otherwise point a local install at a cloud project.
-	if !opts.NoDevEnv && !kind && os.Getenv("NO_DEV_ENV") == "" {
+	noDevEnv := opts.NoDevEnv || kind || os.Getenv("NO_DEV_ENV") != ""
+	if !noDevEnv {
 		path := filepath.Join(root, devEnvFile)
 		if _, statErr := os.Stat(path); statErr == nil {
 			sourced, srcErr := sourceShellEnv(path, root)
@@ -316,6 +322,7 @@ func Load(opts Options) (*Config, error) {
 	cfg := &Config{
 		Root:                     root,
 		Kind:                     kind,
+		NoDevEnv:                 noDevEnv,
 		Namespace:                firstNonEmpty(env["ATE_NAMESPACE"], installdefaults.SystemNamespace),
 		Kubeconfig:               kubeconfig,
 		Context:                  firstNonEmpty(opts.Context, env["KUBECTL_CONTEXT"]),
@@ -541,6 +548,13 @@ func (c *Config) ScriptEnv() []string {
 			delete(merged, name)
 		}
 		merged["ATE_INSTALL_KIND"] = "true"
+	}
+
+	// The scripts source .ate-dev-env.sh for themselves, so whatever made this
+	// process skip it has to reach them as well. A file that names a different
+	// BUCKET_NAME would otherwise send install-microvm-deps.sh to a bucket the
+	// SandboxConfig applied alongside it does not point at.
+	if c.NoDevEnv {
 		merged["NO_DEV_ENV"] = "true"
 	}
 
