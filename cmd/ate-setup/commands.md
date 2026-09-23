@@ -97,6 +97,10 @@ micro-VM sandbox assets into the cluster bucket the `microvm` one names
 (`gs://$BUCKET_NAME/kata-assets/`). `--skip-microvm-assets` skips the staging
 alone; the SandboxConfig is applied either way.
 
+`BUCKET_NAME` is therefore required, and the command refuses to start without
+it. That holds under `--skip-microvm-assets` too, since the applied config
+names the bucket whether or not this install uploaded anything to it.
+
 ## Publish
 
 | `ate-setup` | `hack/install-ate.sh` |

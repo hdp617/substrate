@@ -78,9 +78,11 @@ func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 		return err
 	}
 
-	// sandboxconfig-microvm.yaml names this bucket and the micro-VM assets are
-	// staged into it below. Defaulting it here would stage them where the
-	// applied SandboxConfig does not look, so it is required instead.
+	// Every install applies sandboxconfig-microvm.yaml, and its asset URLs name
+	// this bucket, so no install can do without one; --skip-microvm-assets
+	// drops the upload, not the config. Defaulting it would write a bucket
+	// nothing staged into to a config that accepts it and only fails later,
+	// when an actor cannot fetch what it promises.
 	if e.Cfg.BucketName == "" {
 		return fmt.Errorf("BUCKET_NAME must be set (see hack/ate-dev-env.sh.example); it names the object store bucket holding the micro-VM sandbox assets and the actor snapshots")
 	}
