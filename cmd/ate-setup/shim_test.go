@@ -229,6 +229,13 @@ func TestShimTranslatesFlags(t *testing.T) {
 			"delete atenet",
 		},
 	}, {
+		// Dropping this from the pre-scan would leave the shim exiting 0 while
+		// staging the assets regardless, which is the failure the benchmark
+		// orchestrator would pay for 32 times over.
+		name: "--skip-microvm-assets reaches the install it applies to",
+		args: []string{"--skip-microvm-assets", "--deploy-ate-system"},
+		want: []string{"--skip-microvm-assets deploy ate-system --setup-csi=none"},
+	}, {
 		name: "every create flag maps to a create subcommand",
 		args: []string{
 			"--create-jwt-authority-pool-secret",

@@ -58,6 +58,7 @@ func loadEnv(t *testing.T) {
 		"ATE_INSTALL_PODCERT_WORKERS_PER_SIGNER",
 		"ATE_INSTALL_ROLLOUT_TIMEOUT",
 		"ATE_OTLP_ENDPOINT",
+		"ATE_SKIP_MICROVM_ASSETS",
 		"BENCHMARK_ACTOR_MEMORY",
 		"BUCKET_NAME",
 		"CLUSTER_LOCATION",
@@ -282,6 +283,38 @@ func TestLoadOtlpEndpoint(t *testing.T) {
 	}
 	if got := scriptEnvMap(t, cfg)["ATE_OTLP_ENDPOINT"]; got != "http://from-flag:4317" {
 		t.Errorf("ScriptEnv()[ATE_OTLP_ENDPOINT] = %q, want the flag's value", got)
+	}
+}
+
+// The micro-VM asset upload is ~285MB, so CI and the benchmark orchestrator
+// both opt out of it, one through the environment and one through the flag.
+func TestLoadSkipMicrovmAssets(t *testing.T) {
+	loadEnv(t)
+
+	cfg, err := Load(Options{})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.SkipMicrovmAssets {
+		t.Error("SkipMicrovmAssets = true with nothing asking for it, want false")
+	}
+
+	t.Setenv("ATE_SKIP_MICROVM_ASSETS", "true")
+	cfg, err = Load(Options{})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.SkipMicrovmAssets {
+		t.Error("SkipMicrovmAssets = false with ATE_SKIP_MICROVM_ASSETS=true, want true")
+	}
+
+	t.Setenv("ATE_SKIP_MICROVM_ASSETS", "")
+	cfg, err = Load(Options{SkipMicrovmAssets: true})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.SkipMicrovmAssets {
+		t.Error("SkipMicrovmAssets = false with --skip-microvm-assets, want true")
 	}
 }
 
