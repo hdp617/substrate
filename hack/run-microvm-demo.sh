@@ -19,10 +19,11 @@
 # and calls this script), mirroring install-ate.sh / install-ate-kind.sh.
 #
 # Composes:
-#   1. hack/install-ate.sh --deploy-ate-system  (control plane)
-#   2. hack/install-microvm-deps.sh --install   (asset build/stage + cluster-wide
-#                                                microvm SandboxConfig)
-#   3. Deploy the counter-microvm demo (worker pool manifest, atespace, and
+#   1. hack/install-ate.sh --deploy-ate-system  (control plane, which also
+#                                                applies the microvm
+#                                                SandboxConfig and stages the
+#                                                sandbox assets it names)
+#   2. Deploy the counter-microvm demo (worker pool manifest, atespace, and
 #      ActorTemplate through the ate API).
 #
 # Like the other hack scripts, this sources .ate-dev-env.sh for the cluster /
@@ -31,7 +32,8 @@
 # Env (most come from .ate-dev-env.sh):
 #   KO_DOCKER_REPO   (required) image registry, e.g. gcr.io/PROJECT/ate-images for
 #                    GKE or localhost:5001 for kind.
-#   BUCKET_NAME      object store bucket for assets/snapshots (default: ate-snapshots).
+#   BUCKET_NAME      (required on GKE) object store bucket for assets/snapshots;
+#                    read by install-ate.sh, which stages the sandbox assets into it.
 #   KUBECTL_CONTEXT  (optional) kube context; threaded into install + ko apply + kubectl.
 #   PROJECT_ID       (optional) GCP project for the GCS asset upload (GKE path).
 #   ARCH             target arch (default: from KO_DEFAULTPLATFORMS, else host arch).
@@ -53,7 +55,6 @@ fi
 # --- env / defaults ---------------------------------------------------------
 KO_DOCKER_REPO="${KO_DOCKER_REPO:-}"
 KUBECTL_CONTEXT="${KUBECTL_CONTEXT:-}"
-BUCKET_NAME="${BUCKET_NAME:-ate-snapshots}"
 ATE_INSTALL_KIND="${ATE_INSTALL_KIND:-false}"
 if [[ $# -gt 0 ]]; then
   echo "Error: unknown argument $1" >&2
@@ -80,17 +81,12 @@ if [[ "${ATE_INSTALL_KIND}" == "true" ]]; then
   # install-ate-kind.sh sets NO_DEV_ENV/KO_DOCKER_REPO/ARCH/ATE_INSTALL_KIND itself.
   KUBECTL_CONTEXT="${KUBECTL_CONTEXT}" hack/install-ate-kind.sh --deploy-ate-system
 else
-  # GKE path: pass KO_DOCKER_REPO/BUCKET_NAME/KUBECTL_CONTEXT through the env.
+  # GKE path: install-ate.sh sources .ate-dev-env.sh for KO_DOCKER_REPO and
+  # BUCKET_NAME itself; only the context is threaded through.
   KUBECTL_CONTEXT="${KUBECTL_CONTEXT}" hack/install-ate.sh --deploy-ate-system
 fi
 
-# --- 2. install micro-VM deps (assets + cluster-wide SandboxConfig) --------
-# install-microvm-deps.sh handles the assemble/stage/apply flow. Ordering
-# matters: the control plane must be up so the SandboxConfig CRD exists.
-log "Installing micro-VM dependencies..."
-KUBECTL_CONTEXT="${KUBECTL_CONTEXT}" hack/install-microvm-deps.sh --install
-
-# --- 3. apply the demo ------------------------------------------------------
+# --- 2. apply the demo ------------------------------------------------------
 KCTX_FLAG=""
 if [[ -n "${KUBECTL_CONTEXT}" ]]; then
   KCTX_FLAG=" --context=${KUBECTL_CONTEXT}"

@@ -103,6 +103,7 @@ func init() {
 	f.StringVar(&opts.CredentialProviderName, "credential-provider-name", "", "Credential provider the injector serves, as a ate-secret:// prefix (default ate-secret://k8s.io)")
 	f.StringVar(&opts.CredentialProviderAddress, "credential-provider-address", "", "Address the egress gateway dials the credential provider at (default k8s-credential-provider.ate-system.svc:50051)")
 	f.StringVar(&opts.OtlpEndpoint, "otlp-endpoint", "", "Send control plane telemetry to this OTLP collector instead of the cluster default (defaults to ATE_OTLP_ENDPOINT)")
+	f.BoolVar(&opts.SkipMicrovmAssets, "skip-microvm-assets", false, "Do not assemble and stage the micro-VM sandbox assets into the cluster bucket. The microvm SandboxConfig is still applied, so the bucket must be populated some other way")
 	f.BoolVar(&opts.NoDevEnv, "no-dev-env", false, "Do not source .ate-dev-env.sh")
 
 	f.StringVar(&opts.ImageRepo, "image-repo", "",

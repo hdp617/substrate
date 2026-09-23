@@ -25,9 +25,9 @@ contract). The flow, with the type hooks marked:
      a. Source the target cluster's env; gcloud/docker/kubectl setup and
         the runner image build [hook: build_image] are cached per
         target cluster.
-     b. Sweep leftovers, deploy substrate, let the type shape the
-        cluster [hook: pre_test], deploy workloads (+ microvm deps when
-        the sandbox class needs them).
+     b. Sweep leftovers, deploy substrate (staging the micro-VM assets
+        when the sandbox class needs them), let the type shape the
+        cluster [hook: pre_test], deploy workloads.
      c. Render the type's Job template [hooks: job_tmpl, job_subs],
         submit it, wait, tail logs, delete the Job.
      d. Tear substrate + workloads down again so tests don't pollute
@@ -305,19 +305,25 @@ def validate_and_normalize_tests(tests: list[dict[str, Any]]) -> None:
         TYPES[ttype].validate(t)
 
 
-def deploy_substrate(ate_args: Iterable[str] = ()) -> None:
-    run(["hack/install-ate.sh", "--deploy-ate-system", *(str(a) for a in ate_args)])
+def deploy_substrate(
+    ate_args: Iterable[str] = (), microvm_assets: bool = False
+) -> None:
+    """Install the control plane.
+
+    Args:
+        ate_args: Extra flags for install-ate.sh.
+        microvm_assets: Stage the micro-VM sandbox assets into the bucket.
+            The microvm SandboxConfig is applied either way, so a gvisor test
+            has no use for the ~285MB upload.
+    """
+    args = ["hack/install-ate.sh", "--deploy-ate-system"]
+    if not microvm_assets:
+        args.append("--skip-microvm-assets")
+    run([*args, *(str(a) for a in ate_args)])
 
 
 def teardown_substrate() -> None:
     run_no_check(["hack/install-ate.sh", "--delete-ate-system"])
-
-
-def install_microvm_deps() -> None:
-    """Stage the kata/cloud-hypervisor assets into the cluster bucket.
-    Required before a microvm ActorTemplate can boot; the SandboxConfig
-    naming them comes from deploy_substrate()."""
-    run(["hack/install-microvm-deps.sh", "--install"])
 
 
 def deploy_workloads(
@@ -503,12 +509,13 @@ def main() -> None:
             failure_msg = None
             start_time = time.time()
             try:
-                deploy_substrate(test.get("ateArgs", []))
+                # deploy_substrate applies the SandboxConfig for both
+                # classes; only a microvm test needs the assets staged.
+                deploy_substrate(
+                    test.get("ateArgs", []),
+                    microvm_assets=sandbox_class == "microvm",
+                )
                 TYPES[ttype].pre_test(test)
-                # deploy_substrate applies the microvm SandboxConfig; only
-                # the assets it names are still staged separately.
-                if sandbox_class == "microvm":
-                    install_microvm_deps()
                 deploy_workloads(
                     test.get("workerCount", 1),
                     sandbox_class,

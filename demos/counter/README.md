@@ -163,7 +163,7 @@ Run it and follow the printed next steps:
 KIND_CLUSTER_NAME=<cluster> ./hack/run-microvm-demo-kind.sh
 ```
 
-On a cluster that already has the micro-VM deps (`hack/install-microvm-deps.sh`),
+On a cluster that already has the micro-VM sandbox assets staged,
 deploy directly instead:
 
 ```bash

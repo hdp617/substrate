@@ -89,7 +89,8 @@ Still required, and why:
 Two shell scripts are still invoked rather than reimplemented, because they
 orchestrate image builds, asset assembly, and object-store staging that are out
 of scope for an installer: `benchmarking/deploy_locust.sh` and
-`hack/install-microvm-deps.sh`. They receive `Config.ScriptEnv()`, which
+`hack/install-microvm-deps.sh`, the latter as the last step of
+`deploy ate-system`. They receive `Config.ScriptEnv()`, which
 reconstructs the environment the shell installer would have exported to them.
 
 `ko` is no longer asked to apply anything. The scripts ran `run_ko apply`, which

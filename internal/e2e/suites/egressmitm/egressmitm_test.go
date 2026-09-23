@@ -62,8 +62,8 @@ var probeNamespace string
 //	E2E_EGRESS_MITM=1 hack/run-e2e-kind.sh ./internal/e2e/suites/egressmitm -v -args --no-color
 //	E2E_EGRESS_MITM=1 E2E_SANDBOX_CLASS=microvm hack/run-e2e-kind.sh ./internal/e2e/suites/egressmitm -v -args --no-color
 //
-// The micro-VM variant additionally needs the micro-VM deps installed
-// (hack/run-microvm-demo-kind.sh, or hack/install-microvm-deps.sh --install).
+// The micro-VM variant additionally needs the micro-VM sandbox assets
+// staged, which --deploy-ate-system does.
 func TestActorEgressMITMTrust(t *testing.T) {
 	if os.Getenv("E2E_EGRESS_MITM") == "" {
 		t.Skip("needs the sdsmint (MITM) egress gateway: deploy with hack/install-ate-kind.sh --deploy-atenet --experimental-use-sdsmint, then set E2E_EGRESS_MITM=1")

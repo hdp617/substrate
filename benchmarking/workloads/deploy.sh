@@ -65,7 +65,7 @@ usage() {
   echo "  --delete                    Substitute env vars and delete workloads from the cluster"
   echo "  --worker-count N            Number of WorkerPool replicas (default: 1)"
   echo "  --sandbox-class CLASS       Sandbox runtime for the WorkerPool: gvisor | microvm (default: gvisor)."
-  echo "                              microvm requires hack/install-microvm-deps.sh --install to have run."
+  echo "                              microvm requires --deploy-ate-system to have staged the asset set."
   echo "  --actor-memory SIZE         Memory limit for the benchmark ActorTemplates (default: 256Mi,"
   echo "                              the smallest size microvm admits)"
   echo "  --otlp-endpoint URL         The address to which an instrumented actor container"

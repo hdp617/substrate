@@ -26,8 +26,9 @@
 # The per-arch sha256 values below are the asset sets produced by
 # hack/microvm-assets/assemble.sh; atelet selects the block matching the node's
 # architecture, and each cluster's bucket holds that arch's binaries at these
-# paths. hack/install-microvm-deps.sh assembles and stages that set; a cluster
-# whose bucket someone else populated needs nothing but this config.
+# paths. The installer assembles and stages them by default; pass
+# --skip-microvm-assets (ATE_SKIP_MICROVM_ASSETS=true) to skip that and point a
+# pre-populated bucket at this config instead.
 
 apiVersion: ate.dev/v1alpha1
 kind: SandboxConfig

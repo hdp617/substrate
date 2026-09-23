@@ -21,10 +21,10 @@ the router capacity benchmark — see
 5. `hack/install-ate.sh --deploy-ate-system` + `benchmarking/workloads/deploy.sh
    --deploy --sandbox-class <class>` (these build & push substrate / workload
    images via `ko` as part of their deploy steps — there's no separate
-   `make build-images` step). For a `microvm` test the orchestrator also
-   runs `hack/install-microvm-deps.sh --install` between the two, which
-   stages kata + cloud-hypervisor + virtiofsd assets to the cluster's object
-   store bucket and applies the cluster-wide `microvm` SandboxConfig.
+   `make build-images` step). `--deploy-ate-system` covers a `microvm` test
+   too: it applies the cluster-wide `microvm` SandboxConfig and stages the
+   kata + cloud-hypervisor + virtiofsd assets it names into the cluster's
+   object store bucket.
    For a `nighthawk-ingress` test the orchestrator additionally patches the
    `atenet-router` Deployment right after `deploy_substrate`: `envoyCpu`
    is the benchmark's independent variable and the shipped manifest sets

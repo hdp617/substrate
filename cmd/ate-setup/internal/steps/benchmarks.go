@@ -25,14 +25,11 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/log"
 )
 
-// The benchmark and micro-VM stacks are still driven by shell. They orchestrate
-// several other scripts (image builds, asset assembly, object-store staging)
-// that are out of scope for this command, so ate-setup shells out to them with
-// a translated argument list rather than reimplementing them.
-const (
-	deployLocustScript      = "benchmarking/deploy_locust.sh"
-	installMicrovmDepScript = "hack/install-microvm-deps.sh"
-)
+// The benchmark stack is still driven by shell. It orchestrates several other
+// scripts (image builds, manifest rendering) that are out of scope for this
+// command, so ate-setup shells out to it with a translated argument list rather
+// than reimplementing it.
+const deployLocustScript = "benchmarking/deploy_locust.sh"
 
 // BenchmarkOptions shapes the benchmark WorkerPool.
 type BenchmarkOptions struct {
@@ -65,14 +62,8 @@ func (e *Env) DeployBenchmarks(ctx context.Context, opts BenchmarkOptions) error
 	}
 	log.Stepf("deploy_benchmarks (worker_count=%d, sandbox_class=%s)", opts.WorkerCount, opts.SandboxClass)
 
-	// The microvm SandboxConfig lives outside the default set installed by
-	// `deploy ate-system`, which only installs gvisor-default. The workloads
-	// deploy references it by name and would fail if this were skipped.
-	if opts.SandboxClass == config.SandboxClassMicrovm {
-		if err := e.runScript(ctx, installMicrovmDepScript, "--install"); err != nil {
-			return err
-		}
-	}
+	// A microvm SandboxClass needs no setup here: the SandboxConfig and its
+	// assets come from `deploy ate-system`.
 	return e.runScript(ctx, deployLocustScript, deployLocustArgs(opts, e.Cfg.OtlpEndpoint, e.Cfg.BenchmarkActorMemory)...)
 }
 
@@ -105,15 +96,7 @@ func (e *Env) DeleteBenchmarks(ctx context.Context, opts BenchmarkOptions) error
 	}
 	log.Stepf("delete_benchmarks (sandbox_class=%s)", opts.SandboxClass)
 
-	if err := e.runScript(ctx, deployLocustScript, "--delete"); err != nil {
-		return err
-	}
-	// Only tear down the microvm SandboxConfig if the caller opted into
-	// microvm: it is cluster-wide and may be in use by something else.
-	if opts.SandboxClass == config.SandboxClassMicrovm {
-		return e.runScript(ctx, installMicrovmDepScript, "--delete")
-	}
-	return nil
+	return e.runScript(ctx, deployLocustScript, "--delete")
 }
 
 // runScript executes a repository script from the repository root with the

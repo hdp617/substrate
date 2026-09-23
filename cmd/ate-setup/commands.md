@@ -31,6 +31,7 @@ a pre-scan pass, so they may appear anywhere on its command line.
 | `--experimental-additional-egress-extproc-service NS/SVC:PORT` | `--experimental-additional-egress-extproc-service NS/SVC:PORT` | External processor authorization filter |
 | `--experimental-egress-credential-injection` | `--experimental-egress-credential-injection` | Egress credential injection on the sdsmint gateway's MITM leg (`--credential-provider-name` and `--credential-provider-address` select the provider) |
 | `--otlp-endpoint URL` | `--otlp-endpoint URL`, or `ATE_OTLP_ENDPOINT=URL` | Send control plane telemetry to `URL` instead of the cluster default (see [`benchmarking/telemetry/README.md`](../../benchmarking/telemetry/README.md)) |
+| `--skip-microvm-assets` | `--skip-microvm-assets`, or `ATE_SKIP_MICROVM_ASSETS=true` | Do not assemble and stage the micro-VM sandbox assets into the cluster bucket. The `microvm` SandboxConfig is applied either way, so populate the bucket some other way |
 | `--context NAME` | `KUBECTL_CONTEXT=NAME` | Kubeconfig context; still defaults to `KUBECTL_CONTEXT` |
 | `--kubeconfig PATH` | `KUBECONFIG=PATH` | Explicit kubeconfig path |
 | `--no-dev-env` | `NO_DEV_ENV=1` | Skip `.ate-dev-env.sh` at the repository root |
@@ -90,6 +91,11 @@ that already names a manifest is used as written, and is not looked up.
 apiserver, the controller, atenet, and atelet. It creates every `create`
 resource below on the way, so those subcommands are only needed to redo one on
 a running cluster.
+
+It also applies both SandboxConfigs, `gvisor` and `microvm`, and stages the
+micro-VM sandbox assets into the cluster bucket the `microvm` one names
+(`gs://$BUCKET_NAME/kata-assets/`). `--skip-microvm-assets` skips the staging
+alone; the SandboxConfig is applied either way.
 
 ## Publish
 
@@ -165,9 +171,9 @@ See
 |---|---|---|
 | `deploy demo counter` | `--deploy-demo-counter` | A counter actor exercising snapshot, resume, and atenet ingress |
 | `deploy demo counter --with-external-volume [--storage-class NAME]` | `--deploy-demo-counter-with-external-volume` (`STORAGE_CLASS=NAME`) | The same, plus an external volume and a pre-seeded file to validate. Run `setup csi` first and name the class it created, e.g. `csi-nfs-sc`; defaults to `standard` |
-| `deploy demo counter-microvm` | `--deploy-demo-counter-microvm` | The counter demo on micro-VM workers. Run `hack/install-microvm-deps.sh --install` first |
+| `deploy demo counter-microvm` | `--deploy-demo-counter-microvm` | The counter demo on micro-VM workers. Needs the micro-VM sandbox assets `deploy ate-system` stages |
 | `deploy demo egress` | `--deploy-demo-egress` | Egress policy enforcement through atenet |
-| `deploy demo egress-microvm` | `--deploy-demo-egress-microvm` | The same on micro-VM workers. Run `hack/install-microvm-deps.sh --install` first |
+| `deploy demo egress-microvm` | `--deploy-demo-egress-microvm` | The same on micro-VM workers. Needs the micro-VM sandbox assets `deploy ate-system` stages |
 | `deploy demo egress-mitm` | `--deploy-demo-egress-mitm` | Egress with TLS interception. Needs an sdsmint install (`deploy atenet --experimental-use-sdsmint`) for the trust bundle |
 | `deploy demo egress-microvm-mitm` | `--deploy-demo-egress-microvm-mitm` | Interception on micro-VM workers; needs both of the above |
 | `deploy demo jupyter` | `--deploy-demo-jupyter` | A Jupyter notebook server per actor, reached through atenet ingress |

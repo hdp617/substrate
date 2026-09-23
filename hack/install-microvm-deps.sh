@@ -19,9 +19,9 @@
 # if OUT already has them) and stages it under kata-assets/ (rustfs on kind,
 # GCS on GKE), where atelet fetches it.
 #
-# The `microvm` SandboxConfig that names these assets ships with the ate-install
-# manifests, so hack/install-ate.sh --deploy-ate-system applies it; this script
-# only fills the bucket that config points at.
+# hack/install-ate.sh --deploy-ate-system applies the `microvm` SandboxConfig
+# that names these assets and runs this script by default, so call it directly
+# only to (re-)stage into a cluster installed with --skip-microvm-assets.
 #
 # Every asset sha256 is pinned in the SandboxConfig, so a staged set that does
 # not match the pins is rejected by atelet at fetch time rather than booting a
@@ -56,29 +56,21 @@ ATE_INSTALL_KIND="${ATE_INSTALL_KIND:-false}"
 
 usage() {
   cat <<EOF
-Usage: $0 --install
+Usage: $0
+
+Assembles the micro-VM asset set and stages it into the cluster's object store
+bucket under kata-assets/.
 
 Options:
-  --install   Assemble the micro-VM asset set and stage it into the cluster's
-              object store bucket under kata-assets/.
   -h, --help  Show this message.
 EOF
 }
 
-action=""
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --install) action="install" ;;
-    -h|--help) usage; exit 0    ;;
-    *) echo "Error: unknown argument $1" >&2; usage; exit 1 ;;
-  esac
-  shift
-done
-
-if [[ -z "${action}" ]]; then
-  usage
-  exit 1
-fi
+case "${1:-}" in
+  "") ;;
+  -h|--help) usage; exit 0 ;;
+  *) echo "Error: unknown argument $1" >&2; usage; exit 1 ;;
+esac
 
 # The kind path stages through the in-cluster rustfs, so it needs a cluster to
 # talk to. kubectl falls back to localhost:8080 when neither --context nor a

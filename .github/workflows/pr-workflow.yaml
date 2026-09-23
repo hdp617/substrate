@@ -98,7 +98,8 @@ jobs:
         # prebuilt virtiofsd — all downloads on amd64) is fully pinned by assemble.sh,
         # so key the cache on its hash. The push-to-main run populates the
         # default-branch cache PRs inherit; the weekly schedule refreshes it.
-        # run-microvm-demo-kind.sh skips assembling when these are present.
+        # --deploy-ate-system stages the assets and skips assembling when
+        # these are present.
         path: bin/microvm-assets/amd64
         key: microvm-assets-amd64-${{ hashFiles('hack/microvm-assets/assemble.sh') }}
     - name: Enable KVM
@@ -123,11 +124,13 @@ jobs:
     - name: Install CSI NFS driver
       run: hack/install-ate-kind.sh --setup-csi=nfs
     - name: Deploy micro-VM counter demo
-      # Stages the (cached) assets into the cluster's rustfs and deploys the
-      # counter-microvm demo onto the control plane installed above. The demo
-      # redeploys the control plane, so retain the selected dataplane.
+      # Deploys the counter-microvm demo onto the control plane installed
+      # above. The demo redeploys the control plane, so retain the selected
+      # dataplane and skip re-staging the assets that install already put in
+      # the bucket.
       env:
         ATE_ATENET_DATAPLANE: ${{ matrix.dataplane }}
+        ATE_SKIP_MICROVM_ASSETS: "true"
       run: hack/run-microvm-demo-kind.sh
     - name: Deploy gVisor counter demo
       run: hack/install-ate-kind.sh --deploy-demo-counter

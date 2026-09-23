@@ -14,9 +14,10 @@
 
 // Package countermicrovm installs the micro-VM variant of the counter demo.
 //
-// It needs the cluster-wide `microvm` SandboxConfig that
-// hack/install-microvm-deps.sh --install creates. It has no external-volume
-// option: the CSI path is covered by demo-counter.
+// It needs the micro-VM sandbox assets the cluster-wide `microvm`
+// SandboxConfig names, which deploy ate-system stages unless it was given
+// --skip-microvm-assets. It has no external-volume option: the CSI path is
+// covered by demo-counter.
 package countermicrovm
 
 import (
@@ -32,7 +33,7 @@ const namespace = "ate-demo-counter-microvm"
 func init() {
 	demos.Register(&demos.Substrate{
 		DemoName:           "demo-counter-microvm",
-		Short:              "The counter demo on micro-VM workers (needs hack/install-microvm-deps.sh --install)",
+		Short:              "The counter demo on micro-VM workers (needs the micro-VM assets deploy ate-system stages)",
 		WorkerPoolManifest: "demos/counter/counter-microvm.yaml.tmpl",
 		Deployments:        []steps.TemplateRef{{Atespace: namespace, Name: "counter-microvm"}},
 		Templates: []demos.SubstrateTemplate{{

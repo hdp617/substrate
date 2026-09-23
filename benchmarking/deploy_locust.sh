@@ -41,7 +41,7 @@ usage() {
   echo "  --delete                Delete locust and then workloads"
   echo "  --worker-count N        Number of WorkerPool replicas (default: 1)"
   echo "  --sandbox-class CLASS   Sandbox runtime for the WorkerPool: gvisor | microvm (default: gvisor)."
-  echo "                          microvm requires hack/install-microvm-deps.sh --install to have run."
+  echo "                          microvm requires --deploy-ate-system to have staged the asset set."
   echo "  --otlp-endpoint URL     Forwarded to workloads/deploy.sh. The address to which an"
   echo "                          instrumented actor container sends telemetry."
   echo "  --actor-memory SIZE     Forwarded to workloads/deploy.sh. Memory limit for the"

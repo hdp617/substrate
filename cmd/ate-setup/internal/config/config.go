@@ -104,8 +104,14 @@ type Config struct {
 	// follows neither form.
 	ExpectedJWTIssuer string
 
-	// BucketName is the snapshot bucket demos are templated with.
+	// BucketName is the snapshot bucket demos are templated with. It also
+	// holds the micro-VM sandbox assets, under kata-assets/.
 	BucketName string
+
+	// SkipMicrovmAssets leaves the micro-VM sandbox assets out of the bucket.
+	// The microvm SandboxConfig is applied either way; this only says the
+	// operator populates the bucket themselves.
+	SkipMicrovmAssets bool
 
 	// KODockerRepo is where ko pushes images (KO_DOCKER_REPO).
 	KODockerRepo string
@@ -223,6 +229,7 @@ type Options struct {
 	CredentialProviderName                string
 	CredentialProviderAddress             string
 	OtlpEndpoint                          string
+	SkipMicrovmAssets                     bool
 
 	// Image source selection.
 	ImageRepo string
@@ -317,6 +324,7 @@ func Load(opts Options) (*Config, error) {
 		ClusterLocation:          env["CLUSTER_LOCATION"],
 		ExpectedJWTIssuer:        env["EXPECTED_JWT_ISSUER"],
 		BucketName:               env["BUCKET_NAME"],
+		SkipMicrovmAssets:        opts.SkipMicrovmAssets || env["ATE_SKIP_MICROVM_ASSETS"] == "true",
 		KODockerRepo:             env["KO_DOCKER_REPO"],
 		KODefaultPlatforms:       env["KO_DEFAULTPLATFORMS"],
 		Images:                   loadImageSource(opts, env),

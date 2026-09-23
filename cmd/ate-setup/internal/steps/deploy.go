@@ -78,10 +78,9 @@ func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 		return err
 	}
 
-	// sandboxconfig-microvm.yaml names this bucket, and
-	// hack/install-microvm-deps.sh stages the micro-VM assets into it.
-	// Defaulting it here would point the applied SandboxConfig at a bucket the
-	// staging never wrote to, so it is required instead.
+	// sandboxconfig-microvm.yaml names this bucket and the micro-VM assets are
+	// staged into it below. Defaulting it here would stage them where the
+	// applied SandboxConfig does not look, so it is required instead.
 	if e.Cfg.BucketName == "" {
 		return fmt.Errorf("BUCKET_NAME must be set (see hack/ate-dev-env.sh.example); it names the object store bucket holding the micro-VM sandbox assets and the actor snapshots")
 	}
@@ -141,7 +140,8 @@ func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 		return err
 	}
 	// The micro-VM one names the cluster's bucket, so it is rendered rather
-	// than applied by path.
+	// than applied by path. It goes up even when SkipMicrovmAssets leaves the
+	// bucket for the operator to populate.
 	microvm, err := render.Template(e.Cfg.Manifest("sandboxconfig-microvm.yaml"), bucketValues, nil)
 	if err != nil {
 		return err
@@ -221,7 +221,34 @@ func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 			return err
 		}
 	}
-	return e.applyOtelEndpointOverride(ctx)
+	if err := e.applyOtelEndpointOverride(ctx); err != nil {
+		return err
+	}
+
+	return e.stageMicrovmAssets(ctx)
+}
+
+// The asset set is assembled and staged by shell: the script chains a
+// download/extract step and an object-store upload that are out of scope for
+// this command.
+const installMicrovmDepScript = "hack/install-microvm-deps.sh"
+
+// stageMicrovmAssets uploads the micro-VM asset set to the cluster's bucket,
+// which is what makes sandboxconfig-microvm.yaml usable. It runs last in
+// DeployAteSystem because the kind path stages through the in-cluster rustfs,
+// which the bundle above deploys.
+func (e *Env) stageMicrovmAssets(ctx context.Context) error {
+	if e.Cfg.SkipMicrovmAssets {
+		log.Stepf("Skipping micro-VM asset staging; the microvm SandboxConfig expects %s/kata-assets/ to be populated already", e.Cfg.BucketName)
+		return nil
+	}
+	log.Step("stage_microvm_assets")
+	// Staging is the one install step that needs write access to the bucket, so
+	// it is where a missing bucket or an unauthenticated gcloud first shows up.
+	if err := e.runScript(ctx, installMicrovmDepScript); err != nil {
+		return fmt.Errorf("staging the micro-VM sandbox assets into %s: %w (pass --skip-microvm-assets to install without them)", e.Cfg.BucketName, err)
+	}
+	return nil
 }
 
 // applyPodcertWorkersOverride sets WORKERS_PER_SIGNER on podcertificate-controller if configured.

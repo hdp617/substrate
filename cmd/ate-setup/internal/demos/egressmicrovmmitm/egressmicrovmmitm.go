@@ -13,9 +13,9 @@
 // limitations under the License.
 
 // Package egressmicrovmmitm installs the micro-VM MITM variant of the egress
-// demo. It needs both what demo-egress-microvm needs (the cluster-wide
-// `microvm` SandboxConfig from hack/install-microvm-deps.sh --install) and
-// what demo-egress-mitm needs (an sdsmint install, for the trust bundle).
+// demo. It needs both what demo-egress-microvm needs (the micro-VM sandbox
+// assets deploy ate-system stages) and what demo-egress-mitm needs (an sdsmint
+// install, for the trust bundle).
 package egressmicrovmmitm
 
 import (
@@ -31,7 +31,7 @@ const namespace = "ate-demo-egress-microvm-mitm"
 func init() {
 	demos.Register(&demos.Substrate{
 		DemoName:           "demo-egress-microvm-mitm",
-		Short:              "Egress MITM inspection on micro-VM workers (needs install-microvm-deps.sh and --experimental-use-sdsmint)",
+		Short:              "Egress MITM inspection on micro-VM workers (needs the micro-VM assets and --experimental-use-sdsmint)",
 		WorkerPoolManifest: "demos/egress/egress-microvm-mitm.yaml.tmpl",
 		Deployments:        []steps.TemplateRef{{Atespace: namespace, Name: "egress-microvm-mitm"}},
 		Templates: []demos.SubstrateTemplate{{

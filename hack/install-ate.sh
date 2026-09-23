@@ -63,14 +63,15 @@ demo_usage() {
       echo "                                                (STORAGE_CLASS names the class; it otherwise follows --setup-csi)"
       ;;
     demo-counter-microvm|demo-egress-microvm)
-      echo "  Needs hack/install-microvm-deps.sh --install to have run (cluster-wide microvm SandboxConfig)."
+      echo "  Needs the micro-VM sandbox assets in the cluster bucket, which --deploy-ate-system stages"
+      echo "  unless it was given --skip-microvm-assets."
       ;;
     demo-egress-mitm)
       echo "  Needs an sdsmint install (--deploy-atenet --experimental-use-sdsmint): the actors"
       echo "  project the egress gateway trust bundle, which does not resolve otherwise."
       ;;
     demo-egress-microvm-mitm)
-      echo "  Needs hack/install-microvm-deps.sh --install to have run (cluster-wide microvm SandboxConfig),"
+      echo "  Needs the micro-VM sandbox assets in the cluster bucket (see --deploy-demo-egress-microvm),"
       echo "  and an sdsmint install (--deploy-atenet --experimental-use-sdsmint) for the trust bundle."
       ;;
     demo-claude-code-multiplex)
@@ -89,6 +90,9 @@ usage() {
   echo "Overall infrastructure (all infrastructure components):"
   echo ""
   echo "  --deploy-ate-system                    Deploy core system (CRDs, atelet, apiserver)"
+  echo "  --skip-microvm-assets                  Do not assemble/stage the micro-VM sandbox assets into the"
+  echo "                                         cluster bucket. The microvm SandboxConfig is still applied,"
+  echo "                                         so the bucket must be populated some other way."
   echo "  --setup-csi[=DRIVER]                   Setup CSI driver: nfs, hostpath, both, none (default: none;"
   echo "                                         a bare --setup-csi means nfs; hostpath is Kind only)"
   echo "  --delete-ate-system                    Delete core system"
@@ -165,7 +169,7 @@ usage() {
   echo "  --delete-benchmarks                    Delete the locust stack and workloads"
   echo "  --benchmark-worker-count N             Number of WorkerPool replicas (default: 1)"
   echo "  --benchmark-sandbox-class CLASS        Sandbox runtime for the benchmark WorkerPool: gvisor | microvm (default: gvisor)."
-  echo "                                         microvm requires hack/install-microvm-deps.sh --install to have run."
+  echo "                                         microvm needs the asset set staged, which --deploy-ate-system does."
   echo "  --benchmark-actor-memory SIZE          Memory limit for the benchmark ActorTemplates (default: 256Mi,"
   echo "                                         the smallest size microvm admits)"
   echo ""
@@ -260,6 +264,7 @@ for ((i = 0; i < ${#prescan_args[@]}; i++)); do
       GLOBAL_FLAGS+=("--atenet-dataplane=${prescan_args[$((i + 1))]}")
       ;;
     --experimental-use-sdsmint) GLOBAL_FLAGS+=(--experimental-use-sdsmint) ;;
+    --skip-microvm-assets) GLOBAL_FLAGS+=(--skip-microvm-assets) ;;
     --experimental-additional-egress-extproc-service=*)
       GLOBAL_FLAGS+=("${prescan_args[i]}")
       ;;
@@ -360,6 +365,7 @@ while [[ "$#" -gt 0 ]]; do
     --benchmark-worker-count|--benchmark-sandbox-class|--benchmark-actor-memory) shift ;;
     --atenet-dataplane=*|--podcert-workers-per-signer=*|--rollout-timeout=*|--otlp-endpoint=*) ;;
     --experimental-use-sdsmint|--experimental-additional-egress-extproc-service=*) ;;
+    --skip-microvm-assets) ;;
     --experimental-egress-credential-injection|--credential-provider-name=*|--credential-provider-address=*) ;;
     --benchmark-worker-count=*|--benchmark-sandbox-class=*|--benchmark-actor-memory=*) ;;
 
