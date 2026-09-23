@@ -118,7 +118,7 @@ substitute() {
   # SandboxConfig names are pinned per class in the ActorTemplates (rather
   # than defaulted) so a stale config from a dirty teardown fails loudly
   # instead of silently binding these workloads. gvisor-default is applied by
-  # hack/install-ate.sh; microvm is applied by hack/install-microvm-deps.sh.
+  # hack/install-ate.sh, which applies both sandbox classes.
   # The protojson templates take the sandbox class as its proto enum spelling.
   local manifest="$1"
   local sandbox_config_name sandbox_class_enum

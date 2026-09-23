@@ -13,12 +13,9 @@
 # limitations under the License.
 
 # Cluster-wide SandboxConfig for the micro-VM (kata + cloud-hypervisor) sandbox
-# class. Unlike sandboxconfig-gvisor.yaml (applied unconditionally by
-# hack/install-ate.sh --deploy-ate-system), this is opt-in: apply via
-# hack/install-microvm-deps.sh --install after staging the asset set
-# (assemble.sh + stage-to-gcs.sh / stage-to-rustfs.sh). Every microvm
-# ActorTemplate names it explicitly (configName: microvm), so a missing/stale
-# config fails loudly at template creation.
+# class, applied unconditionally alongside sandboxconfig-gvisor.yaml. Every
+# microvm ActorTemplate names it explicitly (configName: microvm), so a
+# missing/stale config fails loudly at template creation.
 #
 # The sandbox binaries (cloud-hypervisor, virtiofsd, guest kernel, guest rootfs)
 # are FETCHED at runtime from the cluster object store bucket ${BUCKET_NAME}
@@ -29,7 +26,8 @@
 # The per-arch sha256 values below are the asset sets produced by
 # hack/microvm-assets/assemble.sh; atelet selects the block matching the node's
 # architecture, and each cluster's bucket holds that arch's binaries at these
-# paths (staged by hack/install-microvm-deps.sh --install).
+# paths. hack/install-microvm-deps.sh assembles and stages that set; a cluster
+# whose bucket someone else populated needs nothing but this config.
 
 apiVersion: ate.dev/v1alpha1
 kind: SandboxConfig

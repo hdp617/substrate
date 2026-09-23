@@ -14,26 +14,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Install (or delete) the cluster-wide micro-VM (kata + cloud-hypervisor)
-# dependencies. This is opt-in on top of hack/install-ate.sh --deploy-ate-system,
-# which only installs the default gVisor SandboxConfig. Used by:
-#   * hack/run-microvm-demo.sh (before applying the counter-microvm demo)
-#   * benchmarking/automation/orchestrator.py (before deploying a microvm
-#     benchmark workload)
+# Install the micro-VM (kata + cloud-hypervisor) sandbox assets into the
+# cluster's object store bucket: assembles the asset set (assemble.sh; skipped
+# if OUT already has them) and stages it under kata-assets/ (rustfs on kind,
+# GCS on GKE), where atelet fetches it.
 #
-# On --install: assembles the asset set (assemble.sh; skipped if OUT already
-# has them), stages the assets under kata-assets/ to the cluster's object
-# store bucket (rustfs on kind, GCS on GKE), and applies the cluster-wide
-# `microvm` SandboxConfig referencing those assets. Every asset sha256 is
-# pinned in the manifest, so the apply only substitutes the bucket name.
+# The `microvm` SandboxConfig that names these assets ships with the ate-install
+# manifests, so hack/install-ate.sh --deploy-ate-system applies it; this script
+# only fills the bucket that config points at.
 #
-# ActorTemplates must reference the SandboxConfig explicitly via
-# sandboxConfig.configName: microvm. This avoids a dirty teardown silently
-# binding new templates to a stale config.
-#
-# On --delete: removes the SandboxConfig from the cluster. Bucket contents
-# are left alone (they're inert until a SandboxConfig points at them, and
-# re-staging is cheap on next install).
+# Every asset sha256 is pinned in the SandboxConfig, so a staged set that does
+# not match the pins is rejected by atelet at fetch time rather than booting a
+# VM on unexpected bytes.
 #
 # Like the other hack scripts, this sources .ate-dev-env.sh for the cluster /
 # registry / bucket settings unless NO_DEV_ENV is set.
@@ -64,13 +56,11 @@ ATE_INSTALL_KIND="${ATE_INSTALL_KIND:-false}"
 
 usage() {
   cat <<EOF
-Usage: $0 (--install | --delete)
+Usage: $0 --install
 
 Options:
-  --install   Assemble + stage micro-VM assets and apply the cluster-wide
-              microvm SandboxConfig.
-  --delete    Remove the microvm SandboxConfig from the cluster.
-              (Bucket contents are left alone.)
+  --install   Assemble the micro-VM asset set and stage it into the cluster's
+              object store bucket under kata-assets/.
   -h, --help  Show this message.
 EOF
 }
@@ -79,7 +69,6 @@ action=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --install) action="install" ;;
-    --delete)  action="delete"  ;;
     -h|--help) usage; exit 0    ;;
     *) echo "Error: unknown argument $1" >&2; usage; exit 1 ;;
   esac
@@ -91,11 +80,13 @@ if [[ -z "${action}" ]]; then
   exit 1
 fi
 
-# kubectl falls back to localhost:8080 when neither --context nor a kubeconfig
-# current-context is set, which surfaces mid-install as a confusing "connection
-# refused" from the apply -- after the assets have already been assembled and
-# staged. Resolve the target cluster up front instead.
-if [[ -z "${KUBECTL_CONTEXT}" ]] && ! kubectl config current-context >/dev/null 2>&1; then
+# The kind path stages through the in-cluster rustfs, so it needs a cluster to
+# talk to. kubectl falls back to localhost:8080 when neither --context nor a
+# kubeconfig current-context is set, which would surface as a confusing
+# "connection refused" only after the assets have already been assembled.
+# Resolve the target cluster up front instead.
+if [[ "${ATE_INSTALL_KIND}" == "true" ]] &&
+  [[ -z "${KUBECTL_CONTEXT}" ]] && ! kubectl config current-context >/dev/null 2>&1; then
   echo "Error: no kube context to target: KUBECTL_CONTEXT is empty and the" >&2
   echo "       kubeconfig has no current-context." >&2
   echo "       Set KUBECTL_CONTEXT (e.g. in .ate-dev-env.sh) or run:" >&2
@@ -109,23 +100,6 @@ COLOR_RESET='\033[0m'
 log() {
   echo -e "${COLOR_CYAN}[install-microvm-deps]: $*${COLOR_RESET}"
 }
-
-run_kubectl() {
-  kubectl ${KUBECTL_CONTEXT:+--context="${KUBECTL_CONTEXT}"} "$@"
-}
-
-MANIFEST_TEMPLATE="manifests/microvm/sandboxconfig-microvm.yaml.tmpl"
-
-if [[ "${action}" == "delete" ]]; then
-  log "Deleting microvm SandboxConfig..."
-  # Delete by name rather than by manifest so a missing/edited template file
-  # doesn't block cleanup on an older cluster.
-  run_kubectl delete --ignore-not-found sandboxconfig microvm
-  log "Done. (Bucket assets at gs://${BUCKET_NAME}/kata-assets/ left in place.)"
-  exit 0
-fi
-
-# --- install ----------------------------------------------------------------
 
 # Target arch: match the images' platform (KO_DEFAULTPLATFORMS is set by
 # .ate-dev-env.sh on GKE and by the kind wrapper); fall back to the host arch.
@@ -178,12 +152,4 @@ else
   OUT="${OUT}" BUCKET="${BUCKET_NAME}" hack/microvm-assets/stage-to-gcs.sh
 fi
 
-# --- 3. apply the cluster-wide microvm SandboxConfig -----------------------
-# Every asset is downloaded rather than built, so all four carry committed,
-# reproducible per-arch shas and the bucket name is the only substitution left.
-log "Applying microvm SandboxConfig from ${MANIFEST_TEMPLATE}..."
-sed -e "s|\${BUCKET_NAME}|${BUCKET_NAME}|g" \
-    "${MANIFEST_TEMPLATE}" \
-  | run_kubectl apply -f -
-
-log "Done. ActorTemplates must reference this SandboxConfig by name (sandboxConfig.configName: microvm)."
+log "Done. ActorTemplates reach these assets through the cluster-wide microvm SandboxConfig (sandboxConfig.configName: microvm)."

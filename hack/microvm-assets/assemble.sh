@@ -22,7 +22,7 @@
 #   cloud-hypervisor  virtiofsd  vmlinux  rootfs.img
 # Every asset is downloaded rather than built, so all four have reproducible bytes:
 # paste their sha256 sums into the manifest
-# (manifests/microvm/sandboxconfig-microvm.yaml.tmpl).
+# (manifests/ate-install/sandboxconfig-microvm.yaml).
 #
 # ateom drives the kata-agent directly (the kata containerd shim is NOT an asset). The
 # actor rootfs is overlay(virtio-fs RO lower + guest-tmpfs upper), so virtiofsd IS an
@@ -133,5 +133,5 @@ fi
 asset_stamp > "${OUT}/${STAMP_FILE}"
 echo
 echo ">> sha256 (paste all four into the per-arch block in"
-echo ">> manifests/microvm/sandboxconfig-microvm.yaml.tmpl):"
+echo ">> manifests/ate-install/sandboxconfig-microvm.yaml):"
 sha256sum cloud-hypervisor virtiofsd vmlinux rootfs.img

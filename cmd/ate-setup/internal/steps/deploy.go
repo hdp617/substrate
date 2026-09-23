@@ -27,6 +27,7 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/kube"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/log"
+	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/render"
 )
 
 // crdGVK identifies the CRDs whose presence EnsureCRDs checks for.
@@ -76,6 +77,15 @@ func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 	if err := e.CheckCSIDriver(opts.SetupCSI); err != nil {
 		return err
 	}
+
+	// sandboxconfig-microvm.yaml names this bucket, and
+	// hack/install-microvm-deps.sh stages the micro-VM assets into it.
+	// Defaulting it here would point the applied SandboxConfig at a bucket the
+	// staging never wrote to, so it is required instead.
+	if e.Cfg.BucketName == "" {
+		return fmt.Errorf("BUCKET_NAME must be set (see hack/ate-dev-env.sh.example); it names the object store bucket holding the micro-VM sandbox assets and the actor snapshots")
+	}
+	bucketValues := map[string]string{"BUCKET_NAME": e.Cfg.BucketName}
 
 	// The namespace has to exist before RBAC or CRDs are applied.
 	if err := e.EnsureAteSystemNamespace(ctx); err != nil {
@@ -130,6 +140,15 @@ func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 	if err := e.Kube.ApplyPath(ctx, e.Cfg.Manifest("sandboxconfig-gvisor.yaml")); err != nil {
 		return err
 	}
+	// The micro-VM one names the cluster's bucket, so it is rendered rather
+	// than applied by path.
+	microvm, err := render.Template(e.Cfg.Manifest("sandboxconfig-microvm.yaml"), bucketValues, nil)
+	if err != nil {
+		return err
+	}
+	if err := e.Kube.ApplyBytes(ctx, microvm); err != nil {
+		return err
+	}
 
 	// Ahead of the bundle below, for the same reason as the namespace: every
 	// workload pulls this ConfigMap in via envFrom, and a container whose
@@ -159,6 +178,10 @@ func (e *Env) DeployAteSystem(ctx context.Context, opts DeployOptions) error {
 	if err != nil {
 		return err
 	}
+	// Off the overlay path the render is a sweep of the whole install
+	// directory, so it picks up sandboxconfig-microvm.yaml and its
+	// ${BUCKET_NAME} along with everything else.
+	manifests = render.Expand(string(manifests), bucketValues, nil)
 	if err := e.Kube.ApplyBytes(ctx, manifests); err != nil {
 		return err
 	}
