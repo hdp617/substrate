@@ -66,6 +66,11 @@ Options:
 EOF
 }
 
+if [[ $# -gt 1 ]]; then
+  echo "Error: unexpected argument $2" >&2
+  usage
+  exit 1
+fi
 case "${1:-}" in
   "") ;;
   -h|--help) usage; exit 0 ;;

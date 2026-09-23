@@ -247,8 +247,10 @@ func (e *Env) stageMicrovmAssets(ctx context.Context) error {
 	log.Step("stage_microvm_assets")
 	// Staging is the one install step that needs write access to the bucket, so
 	// it is where a missing bucket or an unauthenticated gcloud first shows up.
+	// By now the control plane is up and healthy, and only the micro-VM class
+	// is unusable, so say which of the two failed.
 	if err := e.runScript(ctx, installMicrovmDepScript); err != nil {
-		return fmt.Errorf("staging the micro-VM sandbox assets into %s: %w (pass --skip-microvm-assets to install without them)", e.Cfg.BucketName, err)
+		return fmt.Errorf("the control plane is installed, but staging the micro-VM sandbox assets into %s failed: %w (re-run to retry, or pass --skip-microvm-assets and populate the bucket separately)", e.Cfg.BucketName, err)
 	}
 	return nil
 }
