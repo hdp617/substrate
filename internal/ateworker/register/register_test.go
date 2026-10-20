@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,7 +82,7 @@ func TestBuildRuntime(t *testing.T) {
 		hardware.AttrSandboxBundleHash: "sha256:abc",
 		hardware.AttrCPUFeatures:       "3f",
 		hardware.AttrArchitecture:      runtime.GOARCH,
-	})
+	}, nil)
 	want := &ateletpb.SandboxRuntime{
 		SandboxClass: "gvisor",
 		Version: &ateletpb.VersionedSandboxCompat{
@@ -95,6 +96,77 @@ func TestBuildRuntime(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
 		t.Errorf("buildRuntime() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// The worker's extra attributes are part of every runtime it registers, kept
+// sorted with the ones atelet wrote.
+func TestBuildRequestMergesExtraAttributes(t *testing.T) {
+	f := &sandboxruntimes.File{
+		DefaultRuntime: sandboxruntimes.Attributes{
+			hardware.AttrArchitecture:      "amd64",
+			hardware.AttrSandboxBundleHash: "sha256:v2",
+		},
+		RestorableRuntimes: []sandboxruntimes.Attributes{{
+			hardware.AttrArchitecture:      "amd64",
+			hardware.AttrSandboxBundleHash: "sha256:v1",
+		}},
+	}
+	extra := map[string]string{hardware.AttrSystemInfoDelivery: "copyfile"}
+	got := buildRequest(&ateletpb.WorkerResources{Actors: testActors}, "microvm", f, extra)
+
+	rt := func(hash string) *ateletpb.SandboxRuntime {
+		return &ateletpb.SandboxRuntime{
+			SandboxClass: "microvm",
+			Version: &ateletpb.VersionedSandboxCompat{
+				SchemaVersion: hardware.SchemaVersionV1,
+				Attributes: []*ateletpb.AttributeEntry{
+					{Key: hardware.AttrArchitecture, Value: "amd64"},
+					{Key: hardware.AttrSandboxBundleHash, Value: hash},
+					{Key: hardware.AttrSystemInfoDelivery, Value: "copyfile"},
+				},
+			},
+		}
+	}
+	want := &ateletpb.RegisterWorkerRequest{
+		Capacity:           &ateletpb.WorkerResources{Actors: testActors},
+		DefaultRuntime:     rt("sha256:v2"),
+		RestorableRuntimes: []*ateletpb.SandboxRuntime{rt("sha256:v1")},
+	}
+	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
+		t.Errorf("buildRequest() mismatch (-want +got):\n%s", diff)
+	}
+	if _, ok := f.DefaultRuntime[hardware.AttrSystemInfoDelivery]; ok {
+		t.Error("buildRequest() wrote the extra attribute into the file's attributes")
+	}
+}
+
+// Extra attributes don't change between syncs, so an unchanged file still
+// registers once.
+func TestReconcilerSyncWithExtraAttributesRegistersOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), nodepath.SandboxRuntimesFileName)
+	if _, err := sandboxruntimes.Write(path, &sandboxruntimes.File{
+		DefaultRuntime: sandboxruntimes.Attributes{hardware.AttrArchitecture: "amd64"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	r := newReconciler(
+		ReportConfig{SandboxClass: "microvm", RuntimesFile: path, ExtraAttributes: map[string]string{hardware.AttrSystemInfoDelivery: "copyfile"}},
+		&ateletpb.WorkerResources{Actors: testActors},
+		func() (*sandboxruntimes.File, error) { return sandboxruntimes.Read(path) },
+		func(context.Context, *ateletpb.RegisterWorkerRequest) error { calls++; return nil },
+	)
+	for range 3 {
+		if r.sync(context.Background()) {
+			t.Fatal("sync() asked for a retry")
+		}
+	}
+	if calls != 1 {
+		t.Errorf("register calls = %d, want 1", calls)
+	}
+	if got := r.registered.GetDefaultRuntime().GetVersion().GetAttributes(); len(got) != 2 {
+		t.Errorf("registered attributes = %v, want architecture and %s", got, hardware.AttrSystemInfoDelivery)
 	}
 }
 
@@ -115,8 +187,8 @@ func TestReconcilerSync(t *testing.T) {
 		},
 		RestorableRuntimes: []sandboxruntimes.Attributes{v1.DefaultRuntime},
 	}
-	reqV1 := buildRequest(capacity, "gvisor", v1)
-	reqV2 := buildRequest(capacity, "gvisor", v2)
+	reqV1 := buildRequest(capacity, "gvisor", v1, nil)
+	reqV2 := buildRequest(capacity, "gvisor", v2, nil)
 
 	tests := []struct {
 		name           string
@@ -556,7 +628,7 @@ func TestReconcilerRunWatchesFile(t *testing.T) {
 	}
 	select {
 	case req := <-got:
-		if diff := cmp.Diff(buildRuntime("gvisor", v1.DefaultRuntime), req.GetDefaultRuntime(), protocmp.Transform()); diff != "" {
+		if diff := cmp.Diff(buildRuntime("gvisor", v1.DefaultRuntime, nil), req.GetDefaultRuntime(), protocmp.Transform()); diff != "" {
 			t.Errorf("initial registration default_runtime mismatch (-want +got):\n%s", diff)
 		}
 	case <-ctx.Done():
@@ -578,7 +650,7 @@ func TestReconcilerRunWatchesFile(t *testing.T) {
 	}
 	select {
 	case req := <-got:
-		if diff := cmp.Diff(buildRuntime("gvisor", v2.DefaultRuntime), req.GetDefaultRuntime(), protocmp.Transform()); diff != "" {
+		if diff := cmp.Diff(buildRuntime("gvisor", v2.DefaultRuntime, nil), req.GetDefaultRuntime(), protocmp.Transform()); diff != "" {
 			t.Errorf("updated registration default_runtime mismatch (-want +got):\n%s", diff)
 		}
 		if len(req.GetRestorableRuntimes()) != 1 {
@@ -625,9 +697,13 @@ func TestReportFailsFastOnMissingConfig(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		cfg  ReportConfig
+		// want is in the error, which shows Report failed for the case's
+		// reason rather than a later one.
+		want string
 	}{
 		{
 			name: "missing SandboxClass",
+			want: "SandboxClass is required",
 			cfg: ReportConfig{
 				SocketPath:   filepath.Join(t.TempDir(), "atelet.sock"),
 				RuntimesFile: filepath.Join(t.TempDir(), nodepath.SandboxRuntimesFileName),
@@ -635,9 +711,34 @@ func TestReportFailsFastOnMissingConfig(t *testing.T) {
 		},
 		{
 			name: "missing RuntimesFile",
+			want: "RuntimesFile is required",
 			cfg: ReportConfig{
 				SocketPath:   filepath.Join(t.TempDir(), "atelet.sock"),
 				SandboxClass: "gvisor",
+			},
+		},
+		{
+			// atelet writes this key, so the worker reporting it too would
+			// overwrite what atelet computed.
+			name: "extra attribute atelet writes",
+			want: "is not a worker attribute",
+			cfg: ReportConfig{
+				SocketPath:      filepath.Join(t.TempDir(), "atelet.sock"),
+				SandboxClass:    "microvm",
+				RuntimesFile:    filepath.Join(t.TempDir(), nodepath.SandboxRuntimesFileName),
+				ExtraAttributes: map[string]string{hardware.AttrSandboxBundleHash: "sha256:mine"},
+			},
+		},
+		{
+			// atelet rejects an empty attribute value, and a rejected
+			// registration is not retried.
+			name: "empty extra attribute",
+			want: "has an empty value",
+			cfg: ReportConfig{
+				SocketPath:      filepath.Join(t.TempDir(), "atelet.sock"),
+				SandboxClass:    "microvm",
+				RuntimesFile:    filepath.Join(t.TempDir(), nodepath.SandboxRuntimesFileName),
+				ExtraAttributes: map[string]string{hardware.AttrSystemInfoDelivery: ""},
 			},
 		},
 	} {
@@ -645,6 +746,9 @@ func TestReportFailsFastOnMissingConfig(t *testing.T) {
 			err := Report(ctx, tc.cfg)
 			if err == nil {
 				t.Fatal("Report() succeeded, want an error the caller can exit on")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Report() = %v, want an error containing %q", err, tc.want)
 			}
 			if errors.Is(err, context.DeadlineExceeded) {
 				t.Errorf("Report() retried a permanent failure until the deadline: %v", err)
