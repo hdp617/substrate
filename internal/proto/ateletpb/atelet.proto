@@ -123,6 +123,8 @@ message VersionedSandboxCompat {
   // subset of the worker's); keys only the worker has are ignored. Bump
   // schema_version when a key's meaning changes or older snapshots must no
   // longer match.
+  // Most attributes are written by atelet; the worker binary reports the ones
+  // that describe the guests it boots (e.g. "system_info_delivery").
   // Order as sent does not matter: ate-api-server sorts attributes by key
   // before recording them.
   //

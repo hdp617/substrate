@@ -184,6 +184,13 @@ containers:
 
 The values are delivered as files on a read-only per-actor bind mount, not environment variables, precisely so they carry the correct values after a resume from a shared snapshot — an env var (or a file baked into the image) would be frozen at the snapshot-source actor's values, since it lives in the checkpointed process memory, and would therefore be identical for every actor restored from that snapshot. The metadata fields themselves are fixed for the actor's lifetime, so workloads may cache them; future data sources that rotate (identity tokens and certificates) must be re-read at time of use.
 
+In a micro-VM, the files are copied into guest memory rather than shared from the host. That has four consequences:
+
+* A `SNAPSHOT_FIDELITY_MEMORY` snapshot captures the files with the rest of the guest, so every published snapshot and tag holds the snapshot-source actor's values, trust bundles included.
+* A resume overwrites them with the restored actor's values before its wakeup probe passes. A workload that reads them in the instants after the resume can still see the source's values.
+* A file descriptor held open across a resume, or across a trust bundle rotation, keeps reading the contents it opened. Open the file again to read the current values.
+* Delivering a file passes through a temp file named like it with the extension replaced by `.tmp`, so delivering `ca.pem` or `ca` briefly removes a projected `ca.tmp` from the same directory until it is delivered again. A `path` whose file name has the form `.<name>.tmp` is not delivered.
+
 #### trustBundle
 The trustBundle data source projects the union of the trust anchors of one or more named trust bundles (at most 8) to a single PEM file — inspired by the [Kubernetes clusterTrustBundle projected volume source](https://kubernetes.io/docs/concepts/storage/projected-volumes/#clustertrustbundle), but source-neutral: the name selects a bundle substrate knows how to fetch, and where it is fetched from is a deployment concern, not part of the API.
 
@@ -391,8 +398,12 @@ a `Snapshot` with the following fields:
   attribute recorded on the snapshot present on the worker with the same
   value, except `cpu_features`, whose hexadecimal bitmask on the snapshot must be
   a bitwise subset of the worker's; attributes only the worker reports are
-  ignored). When no compatible worker has
-  capacity:
+  ignored). Some attributes describe what the guest was booted with rather
+  than what the worker can run, such as `system_info_delivery`. A guest
+  restored with its memory keeps what it was booted with, so when the snapshot
+  lacks one of these attributes, the assignment's `sandboxRuntime`, and so the
+  next snapshot's, omits it even if the worker reports it. When no compatible
+  worker has capacity:
   - A durable snapshot — the actor's own, a `sourceTag` clone, or the
     template's golden snapshot a new actor starts from — falls back to any eligible
     worker and downgrades the restore to `SNAPSHOT_FIDELITY_ROOTFS`, preserving

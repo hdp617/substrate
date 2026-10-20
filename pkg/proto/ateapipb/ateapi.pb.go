@@ -7624,6 +7624,11 @@ type VersionedSandboxCompat struct {
 	// can gain keys under one schema_version without invalidating older
 	// snapshots. Removing or recomputing a key is a new schema_version, under
 	// which older snapshots no longer match.
+	// Most attributes are written by atelet; the worker binary reports the ones
+	// that describe the guests it boots (e.g. "system_info_delivery"). Those
+	// describe a guest's shape, which a guest restored with its memory keeps:
+	// when a snapshot lacks one, the runtime its actor is restored under, and
+	// so its next snapshot, omits it too.
 	// Order as sent does not matter: ate-api-server sorts attributes by key
 	// before recording them.
 	//
