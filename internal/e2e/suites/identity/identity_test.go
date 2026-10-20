@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"go.ate.dev/substrate/internal/e2e"
+	"go.ate.dev/substrate/internal/hardware"
 	"go.ate.dev/substrate/internal/resources"
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
 )
@@ -53,6 +54,49 @@ type whoamiResponse struct {
 	Error string `json:"error"`
 }
 
+// wantHeld is what actor id reads through the fd the probe opened when the
+// golden actor started. gVisor re-opens system-info files by path on restore,
+// and so does a micro-VM guest that reads them over virtio-fs, so the fd reads
+// the actor's own id. A micro-VM guest that receives them with CopyFile holds
+// them in a guest tmpfs that each restore overwrites by renaming a new file
+// over the old, so the fd keeps the inode the golden actor opened and reads
+// its id. Actors restored from the golden snapshot keep its guest's delivery.
+func wantHeld(id, golden string, goldenCopyFile bool) string {
+	if goldenCopyFile {
+		return golden
+	}
+	return id
+}
+
+// goldenUsesCopyFile reports whether the guest in tmpl's golden snapshot
+// receives its system-info volumes with CopyFile, as the snapshot's runtime
+// stamp says.
+func goldenUsesCopyFile(t *testing.T, ctx context.Context, clients *e2e.Clients, tmpl *ateapipb.ActorTemplate) bool {
+	t.Helper()
+	if !e2e.IsMicroVM() {
+		return false
+	}
+	ref := &ateapipb.ObjectRef{Atespace: tmpl.GetMetadata().GetAtespace(), Name: tmpl.GetMetadata().GetName()}
+	current, err := clients.SubstrateAPI.GetActorTemplate(ctx, &ateapipb.GetActorTemplateRequest{ActorTemplate: ref})
+	if err != nil {
+		t.Fatalf("GetActorTemplate %v: %v", ref, err)
+	}
+	tagRef := current.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag()
+	if tagRef == nil {
+		t.Fatalf("ActorTemplate %v has no golden tag", ref)
+	}
+	tag, err := clients.SubstrateAPI.GetTag(ctx, &ateapipb.GetTagRequest{Tag: tagRef})
+	if err != nil {
+		t.Fatalf("GetTag %v: %v", tagRef, err)
+	}
+	for _, a := range tag.GetStatus().GetSnapshot().GetSandboxRuntime().GetVersion().GetAttributes() {
+		if a.GetKey() == hardware.AttrSystemInfoDelivery {
+			return a.GetValue() == "copyfile"
+		}
+	}
+	return false
+}
+
 // TestActorIdentity_AfterRestore_IsOwnID_NotGolden is the regression gate for
 // per-actor identity. The env-var approach passed unit tests and config.json
 // inspection yet was broken at runtime: actors restored from the shared golden
@@ -63,13 +107,13 @@ type whoamiResponse struct {
 // It then suspends and resumes one of them: atelet wipes and regenerates the
 // system-info files between suspend and resume, so the suspend-time guest
 // state (the probe's startup-held fd, plus every inode the pre-suspend whoami
-// indexed) must re-bind to the regenerated files at the same paths. The
-// micro-VM lane enforces that the hardest: virtiofsd's find-paths migration
-// re-opens recorded paths on restore, and a path that moved leaves the guest
-// reference faulty (EIO under --migration-on-error=guest-error), which the
-// held-fd assertion below catches. A write scheme that relocates real files
-// (e.g. a timestamped-directory symlink swap) would break every held fd of
-// any actor that ever touched a system-info file.
+// indexed) must re-bind to the regenerated files at the same paths. gVisor's
+// gofer re-opens recorded paths on restore, and a path that moved leaves the
+// guest reference faulty, which the held-fd assertion below catches. A write
+// scheme that relocates real files (e.g. a timestamped-directory symlink swap)
+// would break every held fd of any actor that ever touched a system-info file.
+// A micro-VM guest copies the files into guest memory instead, so its held fd
+// stays readable but keeps the contents it opened (see wantHeld).
 func TestActorIdentity_AfterRestore_IsOwnID_NotGolden(t *testing.T) {
 	env, err := e2e.CheckEnv("BUCKET_NAME", "KO_DOCKER_REPO")
 	if err != nil {
@@ -95,6 +139,7 @@ func TestActorIdentity_AfterRestore_IsOwnID_NotGolden(t *testing.T) {
 	for _, id := range ids {
 		createAndResumeActor(t, ctx, clients, id)
 	}
+	goldenCopyFile := goldenUsesCopyFile(t, ctx, clients, tmpl)
 
 	rc, err := e2e.NewRouterClient(t, ctx)
 	if err != nil {
@@ -119,12 +164,11 @@ func TestActorIdentity_AfterRestore_IsOwnID_NotGolden(t *testing.T) {
 		seen[got.File] = id
 
 		// The fd held open since before the golden snapshot must survive the
-		// restore and read the restored actor's OWN id: system-info files are
-		// regenerated at stable paths precisely so suspend-time guest handles
-		// re-bind (a moved or deleted path would leave the handle faulty and
-		// fail this read).
-		if got.Held != id {
-			t.Errorf("actor %q: id via startup-held fd = %q, want %q (probe read error: %q)", id, got.Held, id, got.Error)
+		// restore and stay readable (a moved or deleted path would leave the
+		// handle faulty and fail this read). What it reads depends on the
+		// runtime; see wantHeld.
+		if want := wantHeld(id, golden, goldenCopyFile); got.Held != want {
+			t.Errorf("actor %q: id via startup-held fd = %q, want %q (probe read error: %q)", id, got.Held, want, got.Error)
 		}
 
 		if got.Atespace != probeNamespace {
@@ -202,8 +246,8 @@ func TestActorIdentity_AfterRestore_IsOwnID_NotGolden(t *testing.T) {
 	if got.File != id {
 		t.Errorf("after suspend/resume: /run/ate/actor-id = %q, want %q (probe read error: %q)", got.File, id, got.Error)
 	}
-	if got.Held != id {
-		t.Errorf("after suspend/resume: id via startup-held fd = %q, want %q (probe read error: %q)", got.Held, id, got.Error)
+	if want := wantHeld(id, golden, goldenCopyFile); got.Held != want {
+		t.Errorf("after suspend/resume: id via startup-held fd = %q, want %q (probe read error: %q)", got.Held, want, got.Error)
 	}
 	if got.Atespace != probeNamespace {
 		t.Errorf("after suspend/resume: /run/ate/atespace = %q, want %q (probe read error: %q)", got.Atespace, probeNamespace, got.Error)

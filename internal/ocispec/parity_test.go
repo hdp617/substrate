@@ -16,12 +16,14 @@ package ocispec
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
 	"go.ate.dev/substrate/internal/sizing"
+	"google.golang.org/protobuf/proto"
 )
 
 const testActorUID = "actor_uid"
@@ -80,7 +82,7 @@ func TestShapers_PreserveEveryVolumeMount(t *testing.T) {
 	}, {
 		runtime: "microvm",
 		shape: func(s *specs.Spec) error {
-			return ShapeMicroVM(s, MicroVMOptions{ActorDirs: parityActorDirs, ContainerName: "app"})
+			return ShapeMicroVM(s, MicroVMOptions{ActorDirs: parityActorDirs, ContainerName: "app", SystemInfoDelivery: SystemInfoVirtioFS})
 		},
 	}} {
 		t.Run(tc.runtime, func(t *testing.T) {
@@ -109,7 +111,7 @@ func TestShapers_PreserveEveryVolumeMount(t *testing.T) {
 // ShapeMicroVM rewrites bind sources to their guest share paths.
 func TestShapeMicroVM_TranslatesSourcesIntoTheShare(t *testing.T) {
 	spec := Build(parityOptions)
-	if err := ShapeMicroVM(spec, MicroVMOptions{ActorDirs: parityActorDirs, ContainerName: "app"}); err != nil {
+	if err := ShapeMicroVM(spec, MicroVMOptions{ActorDirs: parityActorDirs, ContainerName: "app", SystemInfoDelivery: SystemInfoVirtioFS}); err != nil {
 		t.Fatalf("ShapeMicroVM() = %v", err)
 	}
 	for _, tc := range []struct{ dest, wantSource string }{
@@ -125,6 +127,56 @@ func TestShapeMicroVM_TranslatesSourcesIntoTheShare(t *testing.T) {
 	// Guest system mounts replace the host's.
 	if got := mountFor(t, spec, "/dev/shm").Source; got != "shm" {
 		t.Errorf("/dev/shm source = %q, want the guest system mount", got)
+	}
+}
+
+// A system-info mount needs a delivery: guessing one would bind the container
+// to a directory the guest may not have.
+func TestShapeMicroVM_SystemInfoNeedsADelivery(t *testing.T) {
+	spec := Build(parityOptions)
+	if err := ShapeMicroVM(spec, MicroVMOptions{ActorDirs: parityActorDirs, ContainerName: "app"}); err == nil {
+		t.Fatal("ShapeMicroVM with no system-info delivery = nil error, want one")
+	}
+}
+
+// An actor with no system-info root has no system-info mounts to check, so the
+// missing delivery does not reject its other volumes.
+func TestShapeMicroVM_NoSystemInfoRootNeedsNoDelivery(t *testing.T) {
+	dirs := proto.CloneOf(parityActorDirs)
+	dirs.SystemInfoVolumeRootsDir = ""
+	spec := Build(Options{
+		ActorUID:  testActorUID,
+		ActorDirs: dirs,
+		Container: &ateworkerpb.Container{
+			Name:                   "app",
+			ContainerSpec:          &ateworkerpb.ContainerSpec{Args: []string{"/app"}},
+			DurableDirVolumeMounts: []*ateworkerpb.VolumeMount{{Name: "data", MountPath: "/var/data"}},
+		},
+	})
+	if err := ShapeMicroVM(spec, MicroVMOptions{ActorDirs: dirs, ContainerName: "app"}); err != nil {
+		t.Fatalf("ShapeMicroVM() = %v, want success", err)
+	}
+}
+
+// With CopyFile delivery, system-info volumes come from the guest tmpfs; every
+// other volume still comes from the share.
+func TestShapeMicroVM_CopyFileSystemInfoFromTheTmpfs(t *testing.T) {
+	spec := Build(parityOptions)
+	if err := ShapeMicroVM(spec, MicroVMOptions{ActorDirs: parityActorDirs, ContainerName: "app", SystemInfoDelivery: SystemInfoCopyFile}); err != nil {
+		t.Fatalf("ShapeMicroVM() = %v", err)
+	}
+	for _, tc := range []struct{ dest, wantSource string }{
+		{"/var/data", GuestSharedDir + "/" + ShareDurable + "/data"},
+		{"/run/ate", GuestSharedDir + "/" + ShareSystemInfoCopy + "/sysinfo"},
+		{"/mnt/csi", GuestSharedDir + "/" + ShareCSI + "/csi"},
+		{"/ate", GuestSharedDir + "/c_app/" + ShareVolumes + "/agent"},
+	} {
+		if got := mountFor(t, spec, tc.dest).Source; got != tc.wantSource {
+			t.Errorf("%s source = %q, want %q", tc.dest, got, tc.wantSource)
+		}
+	}
+	if got := mountFor(t, spec, "/run/ate").Options; !slices.Contains(got, "ro") {
+		t.Errorf("/run/ate options = %v, want ro", got)
 	}
 }
 

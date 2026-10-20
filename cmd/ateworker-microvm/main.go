@@ -47,6 +47,7 @@ import (
 	"go.ate.dev/substrate/internal/ateworker/pid1"
 	"go.ate.dev/substrate/internal/ateworker/register"
 	"go.ate.dev/substrate/internal/ateworker/tunnel"
+	"go.ate.dev/substrate/internal/hardware"
 	"go.ate.dev/substrate/internal/nodepath"
 	"go.ate.dev/substrate/internal/otlprelay"
 	"go.ate.dev/substrate/internal/preview"
@@ -287,6 +288,7 @@ func do(ctx context.Context) error {
 		Actors:               *maxActors,
 		SandboxClass:         string(atev1alpha1.SandboxClassMicroVM),
 		RuntimesFile:         nodepath.WorkerSandboxRuntimesPath(*podUID),
+		ExtraAttributes:      workerAttributes(),
 	}
 	if reporter, err := register.NewCrashReporter(reportConfig); err != nil {
 		slog.ErrorContext(ctx, "Crashed actors will not be reported", slog.Any("err", err))
@@ -393,9 +395,19 @@ type AteWorkerService struct {
 	// actorCgroups is set when the worker's cgroup is delegated, so each actor's
 	// VMM and virtiofsd run in a leaf of their own.
 	actorCgroups bool
+	// systemInfo copies changed system-info files into running guests.
+	systemInfo systemInfoSyncer
 }
 
 var _ ateworkerpb.WorkerServer = (*AteWorkerService)(nil)
+
+// workerAttributes are the compatibility attributes this worker reports for
+// every runtime, on top of atelet's: every guest it boots receives its
+// system-info volumes with CopyFile, so only workers that do the same may
+// restore their snapshots.
+func workerAttributes() map[string]string {
+	return map[string]string{hardware.AttrSystemInfoDelivery: systemInfoCopyFile}
+}
 
 // NewService creates a new AteWorkerService.
 func NewService(podUID, chBinary string, guestDebug bool, memReserveMiB, maxActors int, tunnel *tunnel.Tunnel, actorLogger *actorlog.ActorLogger) *AteWorkerService {

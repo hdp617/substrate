@@ -37,6 +37,24 @@ const (
 	ShareCSI        = "csi"
 	ShareSystemInfo = "system-info"
 	ShareVolumes    = "volumes"
+	// ShareSystemInfoCopy is the guest tmpfs that holds the system-info
+	// volumes when they are delivered with CopyFile, one subdirectory per
+	// volume.
+	ShareSystemInfoCopy = "system-info-copy"
+)
+
+// SystemInfoDelivery is how a micro-VM guest receives its system-info volumes.
+type SystemInfoDelivery int
+
+const (
+	// SystemInfoDeliveryUnspecified is no delivery. A system-info volume
+	// mounted without one is an error, not a guess.
+	SystemInfoDeliveryUnspecified SystemInfoDelivery = iota
+	// SystemInfoVirtioFS serves the host directory over the virtio-fs share.
+	SystemInfoVirtioFS
+	// SystemInfoCopyFile copies the files into a guest tmpfs with the kata
+	// agent's CopyFile.
+	SystemInfoCopyFile
 )
 
 // GuestContainerID returns the kata container ID for a container name.
@@ -54,6 +72,9 @@ type MicroVMOptions struct {
 	// staged into the share.
 	ActorDirs     *ateworkerpb.ActorDirs
 	ContainerName string
+	// SystemInfoDelivery picks the guest directory system-info volumes are
+	// bound from.
+	SystemInfoDelivery SystemInfoDelivery
 }
 
 // ShapeMicroVM replaces host system mounts with guest mounts, repoints volume
@@ -67,7 +88,7 @@ func ShapeMicroVM(spec *specs.Spec, o MicroVMOptions) error {
 		if m.Type != "bind" {
 			continue
 		}
-		src, err := guestVolumeSource(m.Source, o.ActorDirs, o.ContainerName)
+		src, err := guestVolumeSource(m.Source, o)
 		if err != nil {
 			return fmt.Errorf("mount %q: %w", m.Destination, err)
 		}
@@ -121,11 +142,19 @@ func mergeKataResources(from *specs.LinuxResources) *specs.LinuxResources {
 }
 
 // guestVolumeSource maps a volume's host directory to its guest path.
-func guestVolumeSource(hostPath string, actorDirs *ateworkerpb.ActorDirs, containerName string) (string, error) {
+func guestVolumeSource(hostPath string, o MicroVMOptions) (string, error) {
+	actorDirs, containerName := o.ActorDirs, o.ContainerName
+	if root := actorDirs.GetSystemInfoVolumeRootsDir(); root != "" && strings.HasPrefix(hostPath, root+"/") && o.SystemInfoDelivery == SystemInfoDeliveryUnspecified {
+		return "", fmt.Errorf("system-info volume %q has no delivery", hostPath)
+	}
+	systemInfo := ShareSystemInfo
+	if o.SystemInfoDelivery == SystemInfoCopyFile {
+		systemInfo = ShareSystemInfoCopy
+	}
 	for _, staged := range []struct{ host, guest string }{
 		{actorDirs.GetDurableDirVolumeMountsDir(), path.Join(GuestSharedDir, ShareDurable)},
 		{actorDirs.GetExternalVolumeMountsDir(), path.Join(GuestSharedDir, ShareCSI)},
-		{actorDirs.GetSystemInfoVolumeRootsDir(), path.Join(GuestSharedDir, ShareSystemInfo)},
+		{actorDirs.GetSystemInfoVolumeRootsDir(), path.Join(GuestSharedDir, systemInfo)},
 		{imagecache.ImageVolumeMountPath(filepath.Join(actorDirs.GetOciBundleDir(), containerName), ""), path.Join(GuestSharedDir, GuestContainerID(containerName), ShareVolumes)},
 	} {
 		if rel, ok := strings.CutPrefix(hostPath, staged.host+"/"); ok {

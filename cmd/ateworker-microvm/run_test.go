@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"go.ate.dev/substrate/cmd/ateworker-microvm/internal/kata"
+	"go.ate.dev/substrate/internal/ocispec"
 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
 )
 
@@ -211,7 +212,7 @@ func TestWorkloadIDs(t *testing.T) {
 		}
 		containers = append(containers, &ateworkerpb.Container{Name: name, ContainerSpec: &ateworkerpb.ContainerSpec{Args: []string{"/app"}}})
 	}
-	ctrs, err := (&AteWorkerService{}).buildActorContainers("uid", dirs, containers)
+	ctrs, err := (&AteWorkerService{}).buildActorContainers("uid", dirs, containers, ocispec.SystemInfoCopyFile)
 	if err != nil {
 		t.Fatal(err)
 	}

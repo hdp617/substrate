@@ -28,7 +28,7 @@ import (
 var kataID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]+$`)
 
 func TestGuestContainerID(t *testing.T) {
-	shares := []string{ShareDurable, ShareCSI, ShareSystemInfo}
+	shares := []string{ShareDurable, ShareCSI, ShareSystemInfo, ShareSystemInfoCopy}
 	for _, name := range append([]string{"w", "app", strings.Repeat("a", 63)}, shares...) {
 		id := GuestContainerID(name)
 		if !kataID.MatchString(id) {

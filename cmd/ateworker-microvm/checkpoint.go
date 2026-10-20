@@ -155,11 +155,29 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 		s.readFinal(ctx, hosted)
 	}
 
+	// A MEMORY snapshot must record how its guest receives its system-info
+	// volumes. Checked before the pause, so a checkpoint that cannot record
+	// it leaves the guest running.
+	if scope == ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
+		if _, err := systemInfoDeliveryOf(ra); err != nil {
+			return nil, apierror.FailedPrecondition("cannot take a MEMORY snapshot: %v", err)
+		}
+	}
+
+	// Stop copying system-info files into the guest first: a push into a
+	// paused guest would hang, and one landing after the snapshot would be
+	// lost from it.
+	s.systemInfo.Stop(actorUID)
+
 	tPause := time.Now()
 	dPrep = tPause.Sub(tStart)
 	pauseErr := client.Pause(ctx)
 	dPause = time.Since(tPause)
 	if pauseErr != nil {
+		// The guest runs on, so it needs its system-info files kept current.
+		if syncsSystemInfo(ra, req.GetSpec().GetContainers()) {
+			s.systemInfo.Start(actorUID, actorDirs.GetSystemInfoVolumeRootsDir(), ra.guestAgent, nil)
+		}
 		return nil, fmt.Errorf("while pausing guest: %w", pauseErr)
 	}
 
@@ -223,9 +241,10 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 	}
 
 	// Report exactly the files we wrote so atelet ships precisely this snapshot:
-	// for MEMORY, the CH snapshot (config.json + state.json + memory-ranges +
-	// base-id) plus the upper and durable-dir tars; for ROOTFS, the upper and
-	// durable-dir tars; for VOLUMES, the durable-dir tars alone.
+	// for MEMORY, the CH snapshot (config.json + state.json + memory-ranges),
+	// base-id and system-info-delivery, plus the upper and durable-dir tars;
+	// for ROOTFS, the upper and durable-dir tars; for VOLUMES, the durable-dir
+	// tars alone.
 	snapshotFiles, err := listFiles(checkpointDir)
 	if err != nil {
 		return nil, fmt.Errorf("while listing snapshot files: %w", err)
@@ -256,8 +275,9 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 }
 
 // snapshotVMState captures the paused guest into checkpointDir: the CH snapshot
-// (config.json + state.json + memory-ranges) plus the base-id the restore side
-// needs, and returns how long the snapshot itself took.
+// (config.json + state.json + memory-ranges) plus the base-id and
+// system-info-delivery files the restore side needs, and returns how long the
+// snapshot itself took.
 func (s *AteWorkerService) snapshotVMState(ctx context.Context, client *ch.Client, ra *runningActor, actorUID, checkpointDir string) (time.Duration, error) {
 	// Record the FROZEN base id (the id the guest's virtio-fs find-paths are pinned
 	// to, <baseID>/rootfs). For a cold-run actor this is its own id; for a restored
@@ -272,6 +292,9 @@ func (s *AteWorkerService) snapshotVMState(ctx context.Context, client *ch.Clien
 	}
 	if err := os.WriteFile(filepath.Join(checkpointDir, baseIDFile), []byte(baseID), 0o600); err != nil {
 		return 0, fmt.Errorf("while writing %s: %w", baseIDFile, err)
+	}
+	if err := writeSystemInfoDelivery(checkpointDir, ra); err != nil {
+		return 0, err
 	}
 
 	slog.InfoContext(ctx, "Snapshotting guest", slog.String("id", actorUID), slog.String("dir", checkpointDir))
@@ -336,6 +359,8 @@ func listFiles(dir string) ([]string, error) {
 // teardownActor stops the ateworker-owned CH VMM for an actor. ra may be
 // nil (e.g. ateworker restarted and lost in-memory state).
 func (s *AteWorkerService) teardownActor(ctx context.Context, id string, actorDirs *ateworkerpb.ActorDirs, ra *runningActor) error {
+	// Stop copying system-info files in before the guest goes away.
+	s.systemInfo.Stop(id)
 	// Stop offering the guest to GetWorkloadStats first, before anything below
 	// makes it stop answering. Clearing it here rather than alongside the
 	// attribution is what keeps a poll that lands mid-teardown on the

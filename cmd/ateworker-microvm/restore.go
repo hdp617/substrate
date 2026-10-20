@@ -37,6 +37,7 @@ import (
 	"go.ate.dev/substrate/cmd/ateworker-microvm/internal/kata"
 	"go.ate.dev/substrate/internal/ateworkervalidation"
 	"go.ate.dev/substrate/internal/imagecache"
+	"go.ate.dev/substrate/internal/ocispec"
 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
 	"go.ate.dev/substrate/internal/resources"
 	"go.ate.dev/substrate/internal/sizing"
@@ -303,7 +304,12 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	// deterministic unpack of the same image at the same <cid>/rootfs path
 	// (plus, for merged rootfs, the upper re-materialized from the tar).
 	containers := p.containers
-	ctrs, err := s.buildActorContainers(p.actorUID, p.actorDirs, containers)
+	// The guest keeps the system-info delivery it booted with.
+	delivery, err := readSystemInfoDelivery(restoreDir)
+	if err != nil {
+		return err
+	}
+	ctrs, err := s.buildActorContainers(p.actorUID, p.actorDirs, containers, delivery)
 	if err != nil {
 		return err
 	}
@@ -322,7 +328,7 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 		return err
 	}
 	defer leaf.Close()
-	vfsdProc, err := s.stageMergedRootfs(ctx, rr, actorUID, p.actorDirs, ctrs, containers, leaf.SysProcAttr())
+	vfsdProc, err := s.stageMergedRootfs(ctx, rr, actorUID, p.actorDirs, ctrs, containers, delivery, leaf.SysProcAttr())
 	if err != nil {
 		return err
 	}
@@ -459,6 +465,22 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	}
 	tReseeded := time.Now()
 
+	// The guest's tmpfs still holds the snapshot source's system-info files,
+	// so overwrite them with this actor's before the wakeup probe passes. The
+	// workload has been running since Resume and may read the source's
+	// values until then.
+	var systemInfoRoot string
+	var systemInfo systemInfoHashes
+	if delivery == ocispec.SystemInfoCopyFile && hasSystemInfoVolumes(containers) {
+		systemInfoRoot = p.actorDirs.GetSystemInfoVolumeRootsDir()
+		pushCtx, pushCancel := context.WithTimeout(ctx, systemInfoPushTimeout)
+		systemInfo, err = pushSystemInfo(pushCtx, guestAC, systemInfoRoot)
+		pushCancel()
+		if err != nil {
+			return fmt.Errorf("while copying system-info files into the restored guest: %w", err)
+		}
+	}
+
 	// Block until every wakeup-probe-enabled container reports 200.
 	if err := wakeupprobe.WaitAll(ctx, containers, actornet.ActorVethIP, wakeupprobe.DialFunc(s.sandboxDialer(actorUID))); err != nil {
 		return fmt.Errorf("while waiting for container wakeup probe: %w", err)
@@ -508,8 +530,9 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 		snapshotIsSelfContained: memMode == ch.MemRestoreEager,
 		// Signaling an id the agent does not know fails the whole graceful
 		// shutdown with InvalidContainerId, so these must be what the guest runs.
-		workloadIDs: workloadIDs(ctrs),
-		guestAgent:  guestAC,
+		workloadIDs:        workloadIDs(ctrs),
+		guestAgent:         guestAC,
+		systemInfoDelivery: delivery,
 	}
 
 	// Re-attach stdout/stderr forwarding for each container over the agent
@@ -525,6 +548,9 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	}
 	s.setRunningVM(actorUID, ra)
 	go s.watchVM(p.attribution(), p.actorDirs, ra)
+	if systemInfoRoot != "" {
+		s.systemInfo.Start(actorUID, systemInfoRoot, guestAC, systemInfo)
+	}
 
 	// Publish the guest to GetWorkloadStats, past the last error return above
 	// for the same reason as in coldBootActor. Same client the forwarding above

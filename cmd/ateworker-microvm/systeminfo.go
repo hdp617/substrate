@@ -24,28 +24,52 @@
 // ActorDirs.system_info_volume_roots_dir and wipes/rebuilds them when
 // the actor's directories are reset.
 //
-// ateworker exposes that host directory to the guest under the single kataShared
-// virtio-fs share at SharedDir(actorUID)/system-info, like durable-dir and CSI
-// volumes — no extra virtio-fs device. Read-only is enforced twice: the host bind is
-// remounted read-only (so nothing in the guest can write through the share),
-// and each container bind adds "ro" (so the workload can't write the mount).
+// ateworker copies those files into the guest with the kata agent's CopyFile,
+// into a guest tmpfs the agent mounts at SharedDir(actorUID)/system-info-copy
+// (ocispec.ShareSystemInfoCopy) when it creates the sandbox. The agent only
+// writes CopyFile targets beneath the share's mount point, which is why the
+// tmpfs sits inside the share. On the host, the mount point is a read-only
+// bind of itself, so a copy that misses the tmpfs fails instead of landing on
+// the host. Each container bind adds "ro", so the workload can't write the
+// mount.
 //
-// Unlike durable-dir volumes, system-info volumes are deliberately absent
-// from the checkpoint path: their contents must never be captured into
-// snapshots (see the SystemInfo semantics in docs/api-guide.md). Regeneration
-// is safe under find-paths migration because atelet rewrites the files at
-// their stable share-relative paths before the share's virtiofsd starts.
-// Trust bundles are also rewritten live at those same paths while virtiofsd
-// serves the share; a stale guest reference to the replaced inode degrades
-// to EIO (--migration-on-error=guest-error) rather than failing a restore.
+// Snapshots taken before CopyFile delivery hold guests that read the volumes
+// over virtio-fs, at SharedDir(actorUID)/system-info. A MEMORY snapshot records
+// which delivery its guest uses in systemInfoDeliveryFile, and a MEMORY
+// restore keeps it: a virtio-fs guest gets the host directory bind-mounted
+// read-only into the share, and no copies. Every guest that boots
+// uses CopyFile, and the worker advertises that as the
+// hardware.AttrSystemInfoDelivery compatibility attribute, so a snapshot of a
+// CopyFile guest is only restored by workers that can run it.
+//
+// The files are pushed after the sandbox exists and before any container
+// starts, and again after a MEMORY restore, before the wakeup probe. Between
+// Resume and that push, a restored guest still sees the snapshot source's
+// files. While the actor runs, a syncer pushes every file atelet changes (see
+// systeminfosync.go), so trust bundle rotations reach the guest.
+//
+// Because the files live in guest memory, a MEMORY snapshot captures them,
+// along with the rest of the guest. A restore overwrites them, but every
+// published snapshot holds the source actor's values. The agent writes a temp
+// file and renames it over the target, so a descriptor the workload opened
+// before a push keeps reading the old contents. That temp file is the target
+// with its extension replaced by ".tmp", so pushing "ca.pem" briefly replaces
+// a projected "ca.tmp" in the same directory, which is then copied again. A
+// projected file named like atelet's own temp files (".<name>.tmp") is never
+// copied.
 
 package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 
 	"go.ate.dev/substrate/cmd/ateworker-microvm/internal/kata"
 	"go.ate.dev/substrate/internal/ocispec"
@@ -64,7 +88,8 @@ func hasSystemInfoVolumes(containers []*ateworkerpb.Container) bool {
 	return false
 }
 
-// stageSystemInfoVolumes bind-mounts src, the actor's host system-info
+// stageSystemInfoVolumes serves the volumes over the virtio-fs share instead
+// of copying them: it bind-mounts src, the actor's host system-info
 // directory, into the sandbox's shared virtio-fs tree at SharedDir(actorUID)/system-info,
 // then remounts the bind read-only: atelet is the only writer, and it writes
 // the host source directly, never through the share.
@@ -85,4 +110,234 @@ func (s *AteWorkerService) stageSystemInfoVolumes(ctx context.Context, actorUID,
 		return fmt.Errorf("remounting system-info volumes read-only %q: %w", dst, err)
 	}
 	return nil
+}
+
+// stageSystemInfoCopyDir creates SharedDir(actorUID)/system-info-copy, the
+// mount point the guest's system-info tmpfs covers, and makes it read-only
+// with a bind of itself: should the tmpfs be missing, a copy fails with EROFS
+// rather than writing into the host's share.
+func stageSystemInfoCopyDir(actorUID string) error {
+	dst := filepath.Join(kata.SharedDir(actorUID), ocispec.ShareSystemInfoCopy)
+	kata.Unmount(dst)
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return fmt.Errorf("creating %q: %w", dst, err)
+	}
+	if err := unix.Mount(dst, dst, "", unix.MS_BIND, ""); err != nil {
+		return fmt.Errorf("bind-mounting %q over itself: %w", dst, err)
+	}
+	if err := kata.RemountReadOnly(dst); err != nil {
+		return fmt.Errorf("remounting %q read-only: %w", dst, err)
+	}
+	return nil
+}
+
+// systemInfoDeliveryFile is the MEMORY snapshot file naming how its guest
+// receives its system-info volumes. A snapshot without one predates CopyFile
+// delivery, so its guest uses virtio-fs.
+const systemInfoDeliveryFile = "system-info-delivery"
+
+// The values of systemInfoDeliveryFile. systemInfoCopyFile is also the
+// value of the hardware.AttrSystemInfoDelivery the worker advertises.
+const (
+	systemInfoCopyFile = "copyfile"
+	systemInfoVirtioFS = "virtiofs"
+)
+
+// systemInfoDeliveryOf returns the systemInfoDeliveryFile value for the guest
+// of ra, the activation being checkpointed. Without an activation, or with an
+// unset delivery, there is no telling, so it fails rather than guess.
+func systemInfoDeliveryOf(ra *runningActor) (string, error) {
+	if ra == nil {
+		return "", fmt.Errorf("no running micro-VM to record the system-info delivery of")
+	}
+	switch ra.systemInfoDelivery {
+	case ocispec.SystemInfoCopyFile:
+		return systemInfoCopyFile, nil
+	case ocispec.SystemInfoVirtioFS:
+		return systemInfoVirtioFS, nil
+	default:
+		return "", fmt.Errorf("unknown system-info delivery %d", ra.systemInfoDelivery)
+	}
+}
+
+// writeSystemInfoDelivery records in checkpointDir how the guest of ra
+// receives its system-info volumes (see systemInfoDeliveryOf).
+func writeSystemInfoDelivery(checkpointDir string, ra *runningActor) error {
+	v, err := systemInfoDeliveryOf(ra)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(checkpointDir, systemInfoDeliveryFile), []byte(v), 0o600); err != nil {
+		return fmt.Errorf("writing %s: %w", systemInfoDeliveryFile, err)
+	}
+	return nil
+}
+
+// readSystemInfoDelivery returns how the guest in the MEMORY snapshot in
+// snapshotDir receives its system-info volumes.
+func readSystemInfoDelivery(snapshotDir string) (ocispec.SystemInfoDelivery, error) {
+	b, err := os.ReadFile(filepath.Join(snapshotDir, systemInfoDeliveryFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return ocispec.SystemInfoVirtioFS, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("reading %s: %w", systemInfoDeliveryFile, err)
+	}
+	switch v := string(b); v {
+	case systemInfoCopyFile:
+		return ocispec.SystemInfoCopyFile, nil
+	case systemInfoVirtioFS:
+		return ocispec.SystemInfoVirtioFS, nil
+	default:
+		return 0, fmt.Errorf("snapshot has unknown system-info delivery %q", v)
+	}
+}
+
+// syncsSystemInfo reports whether the guest of ra needs its system-info files
+// copied in and kept current: a CopyFile guest with an agent to copy through
+// and volumes to copy.
+func syncsSystemInfo(ra *runningActor, containers []*ateworkerpb.Container) bool {
+	return ra != nil && ra.guestAgent != nil && ra.systemInfoDelivery == ocispec.SystemInfoCopyFile && hasSystemInfoVolumes(containers)
+}
+
+// fileCopier copies a file into the guest; *kata.AgentClient is one.
+type fileCopier interface {
+	CopyFile(ctx context.Context, path string, data []byte, perm fs.FileMode) error
+}
+
+// systemInfoFile is one file under the system-info volume roots dir.
+type systemInfoFile struct {
+	// rel is the file's path relative to the volume roots dir, so its first
+	// element is the volume.
+	rel  string
+	data []byte
+	perm fs.FileMode
+}
+
+// systemInfoHashes are the content hashes of the files a guest has, keyed by
+// systemInfoFile.rel.
+type systemInfoHashes map[string][sha256.Size]byte
+
+// readSystemInfoFiles returns the regular files under root. It skips
+// symlinks, which atelet never writes, and atelet's in-flight temp files,
+// which it renames over their target once written.
+func readSystemInfoFiles(root string) ([]systemInfoFile, error) {
+	var files []systemInfoFile
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() || isAteletTempFile(d.Name()) {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		files = append(files, systemInfoFile{rel: rel, data: data, perm: info.Mode().Perm()})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reading system-info files under %q: %w", root, err)
+	}
+	return files, nil
+}
+
+// isAteletTempFile reports whether name is a temp file atelet writes a
+// system-info file through (".<base>.tmp"). A projected file can have such a
+// name too; it is skipped all the same.
+func isAteletTempFile(name string) bool {
+	return strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".tmp")
+}
+
+// systemInfoGuestPath is where the system-info file rel lives in the guest.
+func systemInfoGuestPath(rel string) string {
+	return path.Join(ocispec.GuestSharedDir, ocispec.ShareSystemInfoCopy, filepath.ToSlash(rel))
+}
+
+// pushSystemInfo copies every system-info file under root into the guest and
+// returns their content hashes.
+func pushSystemInfo(ctx context.Context, c fileCopier, root string) (systemInfoHashes, error) {
+	files, err := readSystemInfoFiles(root)
+	if err != nil {
+		return nil, err
+	}
+	hashes := make(systemInfoHashes, len(files))
+	if _, errs := pushChanged(ctx, c, files, hashes); len(errs) > 0 {
+		return nil, errs[0]
+	}
+	return hashes, nil
+}
+
+// errPushCutShort marks the error pushChanged returns when its context ends
+// with files left to copy.
+var errPushCutShort = errors.New("system-info push cut short")
+
+// pushChanged copies into the guest each of files whose contents differ from
+// hashes, records their new hashes, and returns the paths it copied and the
+// errors of the copies that failed. A file that fails keeps its old hash, so a
+// later call copies it again. It stops once ctx ends, and reports that as an
+// error, since files may be left uncopied.
+//
+// The agent writes a file through a temp file named like it with the
+// extension replaced by ".tmp", which replaces a projected file of that name
+// in the guest, so such a file is copied again after its sibling.
+func pushChanged(ctx context.Context, c fileCopier, files []systemInfoFile, hashes systemInfoHashes) (copied []string, errs []error) {
+	byRel := make(map[string]systemInfoFile, len(files))
+	for _, f := range files {
+		byRel[f.rel] = f
+	}
+	// push copies f if it changed and returns the projected file the copy
+	// replaced in the guest, if any.
+	push := func(f systemInfoFile) (replaced string) {
+		h := sha256.Sum256(f.data)
+		if have, seen := hashes[f.rel]; seen && have == h {
+			return ""
+		}
+		if err := c.CopyFile(ctx, systemInfoGuestPath(f.rel), f.data, f.perm); err != nil {
+			errs = append(errs, fmt.Errorf("copying system-info file %q into the guest: %w", f.rel, err))
+			return ""
+		}
+		hashes[f.rel] = h
+		copied = append(copied, f.rel)
+		if temp := agentTempFile(f.rel); temp != f.rel {
+			if _, projected := byRel[temp]; projected {
+				delete(hashes, temp)
+				return temp
+			}
+		}
+		return ""
+	}
+	var replaced []string
+	for _, f := range files {
+		if ctx.Err() != nil {
+			return copied, append(errs, fmt.Errorf("%w: %w", errPushCutShort, ctx.Err()))
+		}
+		if r := push(f); r != "" {
+			replaced = append(replaced, r)
+		}
+	}
+	// A file named like a temp file has itself as its temp file, so copying
+	// it again replaces nothing else.
+	for _, rel := range replaced {
+		if ctx.Err() != nil {
+			return copied, append(errs, fmt.Errorf("%w: %w", errPushCutShort, ctx.Err()))
+		}
+		push(byRel[rel])
+	}
+	return copied, errs
+}
+
+// agentTempFile is the temp file the kata agent writes the file rel through:
+// rel with its extension replaced by ".tmp".
+func agentTempFile(rel string) string {
+	return strings.TrimSuffix(rel, filepath.Ext(rel)) + ".tmp"
 }

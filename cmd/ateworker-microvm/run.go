@@ -104,6 +104,10 @@ type runningActor struct {
 	// workloadIDs are the guest container ids of this actor's workloads, for the
 	// SIGTERM the graceful shutdown propagates into the guest (see shutdown.go).
 	workloadIDs []string
+
+	// systemInfoDelivery is how this guest receives its system-info volumes,
+	// fixed when it booted. CheckpointWorkload records it in the snapshot.
+	systemInfoDelivery ocispec.SystemInfoDelivery
 }
 
 // baseIDFile is a tiny snapshot file (under the checkpoint/restore dir) holding
@@ -459,8 +463,9 @@ func (s *AteWorkerService) coldBootActor(ctx context.Context, p actorBootParams)
 	}
 
 	// Prepare each container's OCI spec + record its bundle rootfs (the overlay
-	// lower the host merges under the container's writable upper).
-	ctrs, err := s.buildActorContainers(p.actorUID, p.actorDirs, containers)
+	// lower the host merges under the container's writable upper). A booting
+	// guest always receives its system-info volumes with CopyFile.
+	ctrs, err := s.buildActorContainers(p.actorUID, p.actorDirs, containers, ocispec.SystemInfoCopyFile)
 	if err != nil {
 		return err
 	}
@@ -493,7 +498,7 @@ func (s *AteWorkerService) coldBootActor(ctx context.Context, p actorBootParams)
 		return err
 	}
 	defer leaf.Close()
-	vfsdProc, err := s.stageMergedRootfs(ctx, rr, actorUID, p.actorDirs, ctrs, containers, leaf.SysProcAttr())
+	vfsdProc, err := s.stageMergedRootfs(ctx, rr, actorUID, p.actorDirs, ctrs, containers, ocispec.SystemInfoCopyFile, leaf.SysProcAttr())
 	if err != nil {
 		return err
 	}
@@ -583,8 +588,14 @@ func (s *AteWorkerService) coldBootActor(ctx context.Context, p actorBootParams)
 		}
 	}()
 
-	// Post-boot kata-agent setup: sandbox, guest networking, start each container.
-	if err := s.startActorContainers(ctx, ac, actorUID, vsockPath, ctrs); err != nil {
+	// Post-boot kata-agent setup: sandbox, guest networking, system-info files,
+	// start each container.
+	var systemInfoRoot string
+	if hasSystemInfoVolumes(containers) {
+		systemInfoRoot = p.actorDirs.GetSystemInfoVolumeRootsDir()
+	}
+	systemInfo, err := s.startActorContainers(ctx, ac, actorUID, vsockPath, ctrs, systemInfoRoot)
+	if err != nil {
 		return err
 	}
 	tContainers := time.Now()
@@ -603,12 +614,15 @@ func (s *AteWorkerService) coldBootActor(ctx context.Context, p actorBootParams)
 		slog.Duration("wakeup_probe", time.Since(tContainers)),
 		slog.Duration("since_boot", time.Since(tBooted)))
 
-	ra := &runningActor{chProc: chProc, vfsdProc: vfsdProc, apiSocket: apiSocket, baseID: actorUID, guestAgent: ac, workloadIDs: workloadIDs(ctrs)}
+	ra := &runningActor{chProc: chProc, vfsdProc: vfsdProc, apiSocket: apiSocket, baseID: actorUID, guestAgent: ac, workloadIDs: workloadIDs(ctrs), systemInfoDelivery: ocispec.SystemInfoCopyFile}
 	if err := s.tunnel.Activate(p.attribution(), s.sandboxDialer(p.actorUID), egress); err != nil {
 		return err
 	}
 	s.setRunningVM(actorUID, ra)
 	go s.watchVM(p.attribution(), p.actorDirs, ra)
+	if systemInfoRoot != "" {
+		s.systemInfo.Start(actorUID, systemInfoRoot, ac, systemInfo)
+	}
 
 	// Forward each container's stdout/stderr into the pod logs, keyed by the
 	// container id (see StartRootfsContainer). The goroutines read over ac for
@@ -640,13 +654,15 @@ func (s *AteWorkerService) coldBootActor(ctx context.Context, p actorBootParams)
 // and records the bundle rootfs that backs the overlay's RO lower. No host disk is
 // mounted here — the merged overlays are assembled in stageMergedRootfs after the
 // sandbox state is clean. Both RunWorkload and RestoreWorkload go through here.
-func (s *AteWorkerService) buildActorContainers(actorUID string, actorDirs *ateworkerpb.ActorDirs, containers []*ateworkerpb.Container) ([]actorContainer, error) {
+// delivery is how the guest receives its system-info volumes, which decides
+// where their binds come from.
+func (s *AteWorkerService) buildActorContainers(actorUID string, actorDirs *ateworkerpb.ActorDirs, containers []*ateworkerpb.Container, delivery ocispec.SystemInfoDelivery) ([]actorContainer, error) {
 	ctrs := make([]actorContainer, len(containers))
 	for i, c := range containers {
 		cn := c.GetName()
 		bundle := ociBundlePath(actorDirs, cn)
 		spec := ocispec.Build(ocispec.Options{ActorUID: actorUID, ActorDirs: actorDirs, Container: c})
-		if err := ocispec.ShapeMicroVM(spec, ocispec.MicroVMOptions{ActorDirs: actorDirs, ContainerName: cn}); err != nil {
+		if err := ocispec.ShapeMicroVM(spec, ocispec.MicroVMOptions{ActorDirs: actorDirs, ContainerName: cn, SystemInfoDelivery: delivery}); err != nil {
 			return nil, fmt.Errorf("while shaping the OCI spec for %q: %w", cn, err)
 		}
 		// Compose the bundle rootfs from the node's cached image layers (an
@@ -679,12 +695,13 @@ func (s *AteWorkerService) buildActorContainers(actorUID string, actorDirs *atew
 // (overlay: image lower + the actor's rootfs-upper dirs) at virtiofsd's
 // find-paths location (SharedDir(id)/<cid>/rootfs), stages durable-dir volumes,
 // CSI volumes, and system-info volumes (if any) under SharedDir(id)/durable,
-// SharedDir(id)/csi, and SharedDir(id)/system-info,
+// SharedDir(id)/csi, and SharedDir(id)/system-info (or, for a CopyFile
+// delivery, the mount point of the guest tmpfs that holds them),
 // then starts the ONE virtiofsd that serves them all. Must run AFTER CleanupSandboxState (which
 // wipes SharedDir) and stageRootfsUpper (which owns the upper contents). The returned virtiofsd cmd outlives this call (CH
 // demand-pages from it); the caller owns it (tracked on runningActor, killed
 // in teardownActor).
-func (s *AteWorkerService) stageMergedRootfs(ctx context.Context, rr resolvedRuntime, id string, actorDirs *ateworkerpb.ActorDirs, ctrs []actorContainer, containers []*ateworkerpb.Container, procAttr *syscall.SysProcAttr) (*child.Process, error) {
+func (s *AteWorkerService) stageMergedRootfs(ctx context.Context, rr resolvedRuntime, id string, actorDirs *ateworkerpb.ActorDirs, ctrs []actorContainer, containers []*ateworkerpb.Container, delivery ocispec.SystemInfoDelivery, procAttr *syscall.SysProcAttr) (*child.Process, error) {
 	upperBase := rootfsUpperDir(actorDirs)
 	for _, c := range ctrs {
 		if err := kata.StageMergedRootfs(ctx, c.bundleRootfs, upperBase, c.name, id, c.id); err != nil {
@@ -708,7 +725,13 @@ func (s *AteWorkerService) stageMergedRootfs(ctx context.Context, rr resolvedRun
 		}
 	}
 	if hasSystemInfoVolumes(containers) {
-		if err := s.stageSystemInfoVolumes(ctx, id, actorDirs.GetSystemInfoVolumeRootsDir()); err != nil {
+		var err error
+		if delivery == ocispec.SystemInfoCopyFile {
+			err = stageSystemInfoCopyDir(id)
+		} else {
+			err = s.stageSystemInfoVolumes(ctx, id, actorDirs.GetSystemInfoVolumeRootsDir())
+		}
+		if err != nil {
 			return nil, fmt.Errorf("while staging system-info volumes: %w", err)
 		}
 	}
@@ -848,21 +871,28 @@ func buildFsConfigs(id string) []ch.FsConfig {
 
 // startActorContainers performs the post-boot kata-agent setup the shim normally
 // does at boot: establish the sandbox once (mounting the kataShared virtio-fs base),
-// configure guest networking (eth0 IP/MAC/MTU + routes) once, then start each
-// container on its own overlay rootfs. On failure it dumps guest diagnostics.
-func (s *AteWorkerService) startActorContainers(ctx context.Context, ac *kata.AgentClient, id, vsockPath string, ctrs []actorContainer) error {
+// configure guest networking (eth0 IP/MAC/MTU + routes) once, copy the
+// system-info files under systemInfoRoot into the guest (none when it is
+// empty), then start each container on its own overlay rootfs. It returns the
+// hashes of the files it copied. On failure it dumps guest diagnostics.
+func (s *AteWorkerService) startActorContainers(ctx context.Context, ac *kata.AgentClient, id, vsockPath string, ctrs []actorContainer, systemInfoRoot string) (systemInfoHashes, error) {
 	// Establish the agent sandbox + the kataShared virtio-fs mount (every
-	// container's merged rootfs, durable volumes, CSI volumes, and system-info
-	// volumes). All containers share it, so use the first container's hostname.
+	// container's merged rootfs, durable volumes, and CSI volumes) and the
+	// guest tmpfs the system-info files are copied into. All containers share
+	// it, so use the first container's hostname.
 	tStart := time.Now()
-	sbCtx, sbCancel := context.WithTimeout(ctx, 20*time.Second)
-	err := ac.CreateSandboxForActor(sbCtx, kata.CreateSandboxOpts{
+	opts := kata.CreateSandboxOpts{
 		SandboxID: id,
 		Hostname:  ctrs[0].spec.Hostname,
-	})
+	}
+	if systemInfoRoot != "" {
+		opts.TmpfsDir = ocispec.ShareSystemInfoCopy
+	}
+	sbCtx, sbCancel := context.WithTimeout(ctx, 20*time.Second)
+	err := ac.CreateSandboxForActor(sbCtx, opts)
 	sbCancel()
 	if err != nil {
-		return fmt.Errorf("while creating agent sandbox: %w", err)
+		return nil, fmt.Errorf("while creating agent sandbox: %w", err)
 	}
 	tSandbox := time.Now()
 
@@ -876,22 +906,36 @@ func (s *AteWorkerService) startActorContainers(ctx context.Context, ac *kata.Ag
 			dump := kata.DebugConsoleDump(ctx, vsockPath, "ip addr 2>&1; echo '== route =='; ip route 2>&1; echo '== neigh =='; ip neigh 2>&1")
 			slog.ErrorContext(ctx, "guest network config failed; dump", slog.String("dump", dump))
 		}
-		return fmt.Errorf("while configuring guest network: %w", err)
+		return nil, fmt.Errorf("while configuring guest network: %w", err)
 	}
 
 	tNetwork := time.Now()
 
+	// The containers bind the system-info volumes, so the files must be in
+	// the guest before the first one starts.
+	var hashes systemInfoHashes
+	if systemInfoRoot != "" {
+		pushCtx, pushCancel := context.WithTimeout(ctx, systemInfoPushTimeout)
+		hashes, err = pushSystemInfo(pushCtx, ac, systemInfoRoot)
+		pushCancel()
+		if err != nil {
+			return nil, fmt.Errorf("while copying system-info files into the guest: %w", err)
+		}
+	}
+	tSystemInfo := time.Now()
+
 	for _, c := range ctrs {
 		if err := s.startRootfsContainer(ctx, ac, vsockPath, c); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	slog.InfoContext(ctx, "Agent setup phases", slog.String("id", id),
 		slog.Duration("sandbox", tSandbox.Sub(tStart)),
 		slog.Duration("network", tNetwork.Sub(tSandbox)),
-		slog.Duration("containers", time.Since(tNetwork)),
+		slog.Duration("system_info", tSystemInfo.Sub(tNetwork)),
+		slog.Duration("containers", time.Since(tSystemInfo)),
 		slog.Int("container_count", len(ctrs)))
-	return nil
+	return hashes, nil
 }
 
 // startRootfsContainer brings up one container on its host-merged rootfs (the

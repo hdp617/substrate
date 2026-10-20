@@ -206,10 +206,11 @@ func TestCheckResourceEnvelope_MeasuresAgainstPostReserveGuest(t *testing.T) {
 func TestVolumeSubtreePathsMatchTheGuestShare(t *testing.T) {
 	const uid, cid, vol = "uid", "app", "data"
 	for name, tc := range map[string]struct{ host, guest string }{
-		"durable":     {filepath.Join(kata.SharedDir(uid), ocispec.ShareDurable, vol), filepath.Join(ocispec.GuestSharedDir, ocispec.ShareDurable, vol)},
-		"csi":         {filepath.Join(kata.SharedDir(uid), ocispec.ShareCSI, vol), filepath.Join(ocispec.GuestSharedDir, ocispec.ShareCSI, vol)},
-		"system-info": {filepath.Join(kata.SharedDir(uid), ocispec.ShareSystemInfo, vol), filepath.Join(ocispec.GuestSharedDir, ocispec.ShareSystemInfo, vol)},
-		"image":       {kata.SharedVolumeDir(uid, cid, vol), filepath.Join(ocispec.GuestSharedDir, cid, ocispec.ShareVolumes, vol)},
+		"durable":          {filepath.Join(kata.SharedDir(uid), ocispec.ShareDurable, vol), filepath.Join(ocispec.GuestSharedDir, ocispec.ShareDurable, vol)},
+		"csi":              {filepath.Join(kata.SharedDir(uid), ocispec.ShareCSI, vol), filepath.Join(ocispec.GuestSharedDir, ocispec.ShareCSI, vol)},
+		"system-info":      {filepath.Join(kata.SharedDir(uid), ocispec.ShareSystemInfo, vol), filepath.Join(ocispec.GuestSharedDir, ocispec.ShareSystemInfo, vol)},
+		"system-info-copy": {filepath.Join(kata.SharedDir(uid), ocispec.ShareSystemInfoCopy, vol), filepath.Join(ocispec.GuestSharedDir, ocispec.ShareSystemInfoCopy, vol)},
+		"image":            {kata.SharedVolumeDir(uid, cid, vol), filepath.Join(ocispec.GuestSharedDir, cid, ocispec.ShareVolumes, vol)},
 	} {
 		hostRel, err := filepath.Rel(kata.SharedDir(uid), tc.host)
 		if err != nil {
