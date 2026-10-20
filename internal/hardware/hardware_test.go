@@ -16,9 +16,11 @@ package hardware
 
 import (
 	"runtime"
+	"slices"
 	"testing"
 
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestProbeHost(t *testing.T) {
@@ -292,4 +294,113 @@ func TestMatchingRuntimeAndWorkerMatches(t *testing.T) {
 			t.Errorf("RuntimeFor(empty, unmatchedRT) = %v, want nil", got)
 		}
 	})
+}
+
+// A guest restored from memory keeps the shape it booted with, so the runtime
+// it runs under drops the worker's guest-shape attributes its snapshot lacks.
+func TestRuntimeForInheritsGuestShape(t *testing.T) {
+	attr := func(k, v string) *ateapipb.AttributeEntry { return &ateapipb.AttributeEntry{Key: k, Value: v} }
+	rt := func(attrs ...*ateapipb.AttributeEntry) *ateapipb.SandboxRuntime {
+		return &ateapipb.SandboxRuntime{
+			SandboxClass: "microvm",
+			Version:      &ateapipb.VersionedSandboxCompat{SchemaVersion: SchemaVersionV1, Attributes: attrs},
+		}
+	}
+	arch := attr(AttrArchitecture, "amd64")
+	hash := attr(AttrSandboxBundleHash, "h1")
+	copyfile := attr(AttrSystemInfoDelivery, "copyfile")
+	newWorker := rt(arch, hash, copyfile)
+
+	for _, tc := range []struct {
+		name   string
+		worker *ateapipb.SandboxRuntime
+		snap   *ateapipb.SandboxRuntime
+		want   *ateapipb.SandboxRuntime
+	}{
+		{"legacy snapshot on a new worker drops the key", newWorker, rt(arch, hash), rt(arch, hash)},
+		{"stamped snapshot on a new worker keeps the key", newWorker, rt(arch, hash, copyfile), newWorker},
+		{"legacy snapshot on a legacy worker is unchanged", rt(arch, hash), rt(arch, hash), rt(arch, hash)},
+		{"no requirement boots fresh under the worker's shape", newWorker, nil, newWorker},
+		{"unmatched snapshot boots fresh under the worker's shape", newWorker, rt(attr(AttrArchitecture, "arm64")), newWorker},
+		// A worker without the key cannot restore a CopyFile guest, so the
+		// guest boots fresh under that worker's runtime.
+		{"stamped snapshot on a legacy worker boots fresh", rt(arch, hash), rt(arch, hash, copyfile), rt(arch, hash)},
+		// Keys the worker has but the snapshot lacks that are not guest-shape
+		// keep their meaning: they describe the worker.
+		{"only guest-shape keys are dropped", rt(arch, attr(AttrCPUModel, "6:143"), hash, copyfile), rt(arch, hash), rt(arch, attr(AttrCPUModel, "6:143"), hash)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status := &ateapipb.WorkerStatus{DefaultRuntime: tc.worker}
+			before := proto.Clone(status)
+
+			got := RuntimeFor(status, tc.snap)
+
+			if !proto.Equal(got, tc.want) {
+				t.Errorf("RuntimeFor() = %v, want %v", got, tc.want)
+			}
+			if !proto.Equal(status, before) {
+				t.Errorf("RuntimeFor() modified the worker status: %v, was %v", status, before)
+			}
+			keys := make([]string, 0, len(got.GetVersion().GetAttributes()))
+			for _, a := range got.GetVersion().GetAttributes() {
+				keys = append(keys, a.GetKey())
+			}
+			if !slices.IsSorted(keys) || len(slices.Compact(slices.Clone(keys))) != len(keys) {
+				t.Errorf("attribute keys = %v, want sorted and unique", keys)
+			}
+			// The resume path checks the assignment's runtime against the
+			// snapshot to decide whether memory is restored, so the inherited
+			// runtime must still match it.
+			if tc.snap != nil && Matches(tc.worker, tc.snap) && !Matches(got, tc.snap) {
+				t.Errorf("RuntimeFor() = %v no longer matches the snapshot %v", got, tc.snap)
+			}
+		})
+	}
+}
+
+// A snapshot of a CopyFile guest must stay off workers that don't report the
+// key: they would restore the guest without ever copying its files in.
+func TestCopyFileSnapshotDoesNotMatchLegacyWorker(t *testing.T) {
+	attr := func(k, v string) *ateapipb.AttributeEntry { return &ateapipb.AttributeEntry{Key: k, Value: v} }
+	rt := func(attrs ...*ateapipb.AttributeEntry) *ateapipb.SandboxRuntime {
+		return &ateapipb.SandboxRuntime{
+			SandboxClass: "microvm",
+			Version:      &ateapipb.VersionedSandboxCompat{SchemaVersion: SchemaVersionV1, Attributes: attrs},
+		}
+	}
+	arch, hash := attr(AttrArchitecture, "amd64"), attr(AttrSandboxBundleHash, "h1")
+	legacy := rt(arch, hash)
+	snap := rt(arch, hash, attr(AttrSystemInfoDelivery, "copyfile"))
+
+	if Matches(legacy, snap) {
+		t.Error("Matches(legacy worker, CopyFile snapshot) = true, want false")
+	}
+	if WorkerMatches(&ateapipb.WorkerStatus{DefaultRuntime: legacy}, snap) {
+		t.Error("WorkerMatches(legacy worker, CopyFile snapshot) = true, want false")
+	}
+}
+
+// The inherited runtime is a copy only when something was dropped; otherwise
+// it is the worker's own runtime.
+func TestRuntimeForClonesOnlyWhenDropping(t *testing.T) {
+	worker := &ateapipb.SandboxRuntime{
+		SandboxClass: "microvm",
+		Version: &ateapipb.VersionedSandboxCompat{SchemaVersion: SchemaVersionV1, Attributes: []*ateapipb.AttributeEntry{
+			{Key: AttrArchitecture, Value: "amd64"},
+			{Key: AttrSystemInfoDelivery, Value: "copyfile"},
+		}},
+	}
+	status := &ateapipb.WorkerStatus{DefaultRuntime: worker}
+	if got := RuntimeFor(status, worker); got != worker {
+		t.Errorf("RuntimeFor(matching stamped snapshot) = %p, want the worker's runtime %p", got, worker)
+	}
+	legacy := &ateapipb.SandboxRuntime{
+		SandboxClass: "microvm",
+		Version: &ateapipb.VersionedSandboxCompat{SchemaVersion: SchemaVersionV1, Attributes: []*ateapipb.AttributeEntry{
+			{Key: AttrArchitecture, Value: "amd64"},
+		}},
+	}
+	if got := RuntimeFor(status, legacy); got == worker {
+		t.Error("RuntimeFor(legacy snapshot) returned the worker's runtime, want a copy without the key")
+	}
 }

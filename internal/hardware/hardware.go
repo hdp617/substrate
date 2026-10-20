@@ -18,9 +18,11 @@ package hardware
 
 import (
 	"runtime"
+	"slices"
 
 	"go.ate.dev/substrate/internal/proto/ateletpb"
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -49,7 +51,22 @@ const (
 	// AttrCPUModel identifies the host CPU family/model (e.g. "6:143" on amd64
 	// or "0x0:0xd40:1" on arm64) reported by microVM runtimes.
 	AttrCPUModel = "cpu_model"
+
+	// AttrSystemInfoDelivery is how a micro-VM guest receives its system-info
+	// volumes ("copyfile"). The worker binary reports it rather than atelet,
+	// because the worker decides the guest's shape. A guest's shape is fixed
+	// when it boots, so it is a guest-shape attribute (see RuntimeFor).
+	AttrSystemInfoDelivery = "system_info_delivery"
 )
+
+// guestShapeAttributes are the attributes that describe what a guest was
+// booted with, rather than what the worker can run. A guest restored from
+// memory keeps the shape it was booted with, whatever the worker reports.
+var guestShapeAttributes = []string{AttrSystemInfoDelivery}
+
+// WorkerAttributes are the attributes a worker binary reports itself, rather
+// than atelet writing them to the sandbox runtimes file.
+var WorkerAttributes = []string{AttrSystemInfoDelivery}
 
 // ProbeHost returns a minimal v1 VersionedSandboxCompat with the current
 // host's architecture in atelet wire format, for synthetic workers in tests
@@ -200,11 +217,44 @@ func (r Requirement) WorkerMatches(status *ateapipb.WorkerStatus) bool {
 // when it can restore the snapshot, else the DefaultRuntime the guest boots
 // fresh under. This is what an assignment records and what the actor's next
 // checkpoint is stamped with.
+//
+// A guest restored from memory keeps the shape it was booted with, so when a
+// non-empty requirement matched, the result drops the guest-shape attributes
+// the snapshot does not carry: the guest never took them on, and stamping its
+// next checkpoint with them would keep it off the workers that can restore it.
 func (r Requirement) RuntimeFor(status *ateapipb.WorkerStatus) *ateapipb.SandboxRuntime {
-	if rt := r.MatchingRuntime(status); rt != nil {
+	rt := r.MatchingRuntime(status)
+	if rt == nil {
+		return status.GetDefaultRuntime()
+	}
+	if r.snap == nil {
 		return rt
 	}
-	return status.GetDefaultRuntime()
+	return r.inheritGuestShape(rt)
+}
+
+// inheritGuestShape returns rt without the guest-shape attributes the
+// snapshot does not carry. It clones rt only when it drops one, so the
+// worker's status is never modified.
+func (r Requirement) inheritGuestShape(rt *ateapipb.SandboxRuntime) *ateapipb.SandboxRuntime {
+	drop := func(a *ateapipb.AttributeEntry) bool {
+		return slices.Contains(guestShapeAttributes, a.GetKey()) && !r.hasAttribute(a.GetKey())
+	}
+	if !slices.ContainsFunc(rt.GetVersion().GetAttributes(), drop) {
+		return rt
+	}
+	out := proto.CloneOf(rt)
+	// Deleting keeps the remaining attributes in their order, which is sorted
+	// by key, each key once.
+	out.Version.Attributes = slices.DeleteFunc(out.Version.Attributes, drop)
+	return out
+}
+
+// hasAttribute reports whether the snapshot's compat carries key.
+func (r Requirement) hasAttribute(key string) bool {
+	return slices.ContainsFunc(r.compat.GetAttributes(), func(a *ateapipb.AttributeEntry) bool {
+		return a.GetKey() == key
+	})
 }
 
 // Matches reports whether a worker's SandboxRuntime can restore a snapshot

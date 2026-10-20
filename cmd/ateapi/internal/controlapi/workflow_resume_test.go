@@ -2760,6 +2760,137 @@ func TestAssignWorkerAttempt_PrefersRuntimeMatchingWorkerAndFallsBack(t *testing
 	})
 }
 
+// A guest restored from memory keeps the system-info delivery it booted with,
+// so a snapshot taken before workers advertised the key must stay restorable
+// by workers that don't: the assignment, and so the next stamp, drops the key.
+func TestAssignWorkerAttempt_InheritsGuestShape(t *testing.T) {
+	legacyRT := testRuntime("amd64", "h1")
+	copyfileRT := testRuntime("amd64", "h1")
+	copyfileRT.Version.Attributes = append(copyfileRT.Version.Attributes,
+		&ateapipb.AttributeEntry{Key: hardware.AttrSystemInfoDelivery, Value: "copyfile"})
+	arm64CopyfileRT := testRuntime("arm64", "h1")
+	arm64CopyfileRT.Version.Attributes = append(arm64CopyfileRT.Version.Attributes,
+		&ateapipb.AttributeEntry{Key: hardware.AttrSystemInfoDelivery, Value: "copyfile"})
+	actorRef := resources.ActorRef{Atespace: "team-a", Name: "id1"}
+	suspended := ateapipb.ActorState_ACTOR_STATE_SUSPENDED
+
+	t.Run("legacy snapshot on a copyfile worker records no key", func(t *testing.T) {
+		ctx := context.Background()
+		st := newTestPersistence(t)
+		seedRuntimeWorker(t, ctx, st, "new-pod", "node-new", copyfileRT)
+		actor := seedActorWithSnapshot(t, ctx, st, suspended, "", durableMemorySnapshot(t, legacyRT))
+
+		stored, _, err := newSchedulingWorkflow(t, ctx, st).assignWorkerAttempt(ctx, actorRef, actor, &ateapipb.ActorTemplate{})
+		if err != nil {
+			t.Fatalf("assignWorkerAttempt: %v", err)
+		}
+		assertAssignedRuntime(t, stored, legacyRT)
+		// The resume must still restore memory: it compares the assignment
+		// against the snapshot.
+		if !hardware.Matches(stored.GetStatus().GetWorkerAssignment().GetSandboxRuntime(), legacyRT) {
+			t.Error("inherited assignment runtime no longer matches the snapshot; the resume would drop memory")
+		}
+	})
+
+	t.Run("copyfile snapshot on a copyfile worker keeps the key", func(t *testing.T) {
+		ctx := context.Background()
+		st := newTestPersistence(t)
+		seedRuntimeWorker(t, ctx, st, "new-pod", "node-new", copyfileRT)
+		actor := seedActorWithSnapshot(t, ctx, st, suspended, "", durableMemorySnapshot(t, copyfileRT))
+
+		stored, _, err := newSchedulingWorkflow(t, ctx, st).assignWorkerAttempt(ctx, actorRef, actor, &ateapipb.ActorTemplate{})
+		if err != nil {
+			t.Fatalf("assignWorkerAttempt: %v", err)
+		}
+		assertAssignedRuntime(t, stored, copyfileRT)
+	})
+
+	t.Run("copyfile snapshot lands on a copyfile worker beside a legacy one", func(t *testing.T) {
+		ctx := context.Background()
+		st := newTestPersistence(t)
+		seedRuntimeWorker(t, ctx, st, "legacy-pod", "node-legacy", legacyRT)
+		seedRuntimeWorker(t, ctx, st, "new-pod", "node-new", copyfileRT)
+		actor := seedActorWithSnapshot(t, ctx, st, suspended, "", durableMemorySnapshot(t, copyfileRT))
+
+		stored, _, err := newSchedulingWorkflow(t, ctx, st).assignWorkerAttempt(ctx, actorRef, actor, &ateapipb.ActorTemplate{})
+		if err != nil {
+			t.Fatalf("assignWorkerAttempt: %v", err)
+		}
+		if got := stored.GetStatus().GetWorkerAssignment().GetWorkerPod(); got != "new-pod" {
+			t.Errorf("assigned worker pod = %q, want new-pod: only it can restore a CopyFile guest", got)
+		}
+	})
+
+	t.Run("copyfile snapshot on a legacy worker restores without memory", func(t *testing.T) {
+		ctx := context.Background()
+		st := newTestPersistence(t)
+		seedRuntimeWorker(t, ctx, st, "legacy-pod", "node-legacy", legacyRT)
+		actor := seedActorWithSnapshot(t, ctx, st, suspended, "", durableMemorySnapshot(t, copyfileRT))
+
+		stored, _, err := newSchedulingWorkflow(t, ctx, st).assignWorkerAttempt(ctx, actorRef, actor, &ateapipb.ActorTemplate{})
+		if err != nil {
+			t.Fatalf("assignWorkerAttempt: %v", err)
+		}
+		assertAssignedRuntime(t, stored, legacyRT)
+		// The resume compares the assignment against the snapshot to decide
+		// whether it may restore memory.
+		if hardware.Matches(stored.GetStatus().GetWorkerAssignment().GetSandboxRuntime(), copyfileRT) {
+			t.Error("legacy assignment matches the CopyFile snapshot; the resume would restore its memory on a worker that never copies its files in")
+		}
+	})
+
+	t.Run("relaxed fallback keeps the worker's key", func(t *testing.T) {
+		ctx := context.Background()
+		st := newTestPersistence(t)
+		// The guest cold-boots on the fallback worker, so it takes that
+		// worker's shape.
+		seedRuntimeWorker(t, ctx, st, "arm-pod", "node-arm", arm64CopyfileRT)
+		actor := seedActorWithSnapshot(t, ctx, st, suspended, "", durableMemorySnapshot(t, legacyRT))
+
+		stored, _, err := newSchedulingWorkflow(t, ctx, st).assignWorkerAttempt(ctx, actorRef, actor, &ateapipb.ActorTemplate{})
+		if err != nil {
+			t.Fatalf("assignWorkerAttempt: %v", err)
+		}
+		assertAssignedRuntime(t, stored, arm64CopyfileRT)
+	})
+
+	t.Run("suspend stamps the inherited runtime", func(t *testing.T) {
+		ctx := context.Background()
+		st := newTestPersistence(t)
+		seedRuntimeWorker(t, ctx, st, "new-pod", "node-new", copyfileRT)
+		actor := seedActorWithSnapshot(t, ctx, st, suspended, "", durableMemorySnapshot(t, legacyRT))
+		assigned, _, err := newSchedulingWorkflow(t, ctx, st).assignWorkerAttempt(ctx, actorRef, actor, &ateapipb.ActorTemplate{})
+		if err != nil {
+			t.Fatalf("assignWorkerAttempt: %v", err)
+		}
+
+		// Suspend a running actor holding that assignment.
+		suspendSt := newTestPersistence(t)
+		seedSuspendTemplate(t, ctx, suspendSt, &ateapipb.SnapshotConfig{StorageLocation: "gs://bucket/root/"})
+		runningRef := resources.ActorRef{Atespace: "team-a", Name: "actor-1"}
+		storetest.MustCreateActor(t, ctx, suspendSt, &ateapipb.Actor{
+			Metadata:      &ateapipb.ResourceMetadata{Atespace: runningRef.Atespace, Name: runningRef.Name},
+			ActorTemplate: suspendTestTemplateRef(),
+			Status: &ateapipb.ActorStatus{
+				State:            ateapipb.ActorState_ACTOR_STATE_RUNNING,
+				WorkerAssignment: assigned.GetStatus().GetWorkerAssignment(),
+			},
+		})
+		_, err = newMarkOnlyWorkflow(suspendSt).SuspendActor(ctx, runningRef, suspendSync)
+		assertStoppedAtDial(t, err)
+		marked := mustReadActor(t, ctx, suspendSt, runningRef)
+
+		stamp := findLatestDurableSnapshot(marked.GetStatus(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING).GetSandboxRuntime()
+		if diff := cmp.Diff(legacyRT, stamp, protocmp.Transform()); diff != "" {
+			t.Errorf("next snapshot's SandboxRuntime mismatch (-want +got):\n%s", diff)
+		}
+		// A worker that does not advertise the key can restore it.
+		if !hardware.Matches(legacyRT, stamp) {
+			t.Error("a legacy worker cannot restore the next snapshot")
+		}
+	})
+}
+
 func TestValidateAssignedWorker_RuntimeFallback(t *testing.T) {
 	t.Run("accepts fallback worker on re-entry for durable snapshot", func(t *testing.T) {
 		ctx := context.Background()

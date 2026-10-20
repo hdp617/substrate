@@ -149,8 +149,11 @@ func TestActorSnapshotLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get assigned Worker %s: %v", assignment.GetWorker().GetName(), err)
 	}
-	if diff := cmp.Diff(worker.GetStatus().GetDefaultRuntime(), assignment.GetSandboxRuntime(), protocmp.Transform()); diff != "" {
-		t.Fatalf("worker_assignment.sandbox_runtime mismatch (-worker default_runtime +assignment):\n%s", diff)
+	// The assignment is the worker's runtime that restores the golden stamp,
+	// less the guest-shape attributes the stamp lacks: a guest restored with
+	// its memory keeps the shape it booted with.
+	if diff := cmp.Diff(hardware.RuntimeFor(worker.GetStatus(), goldenStamp), assignment.GetSandboxRuntime(), protocmp.Transform()); diff != "" {
+		t.Fatalf("worker_assignment.sandbox_runtime mismatch (-runtime for the golden stamp on the worker +assignment):\n%s", diff)
 	}
 	if !hardware.Matches(assignment.GetSandboxRuntime(), goldenStamp) {
 		t.Fatalf("assigned runtime %v cannot restore the golden stamp %v", assignment.GetSandboxRuntime(), goldenStamp)
