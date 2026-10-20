@@ -21,12 +21,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"strings"
 	"time"
 
 	"github.com/containerd/ttrpc"
 	"go.ate.dev/substrate/cmd/ateworker-microvm/internal/third_party/kata/agentpb"
+	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -156,6 +158,41 @@ func (a *AgentClient) ReseedRandomDev(ctx context.Context, data []byte) error {
 		return fmt.Errorf("agent ReseedRandomDev: %w", err)
 	}
 	return nil
+}
+
+// copyFileChunkSize bounds the data in one CopyFile request, well under ttrpc's
+// 4MiB message limit.
+const copyFileChunkSize = 1 << 20
+
+// CopyFile writes data to path in the guest with the given permission bits,
+// creating missing parent directories. path must lie under the guest share,
+// the only tree the agent writes CopyFile targets into. The agent assembles a
+// temporary file from the chunks and renames it over path once it has every
+// byte, so readers never see a partial file, and a descriptor opened before
+// the call keeps the old contents. Mirrors grpc.AgentService/CopyFile.
+func (a *AgentClient) CopyFile(ctx context.Context, path string, data []byte, perm fs.FileMode) error {
+	if !strings.HasPrefix(path, guestSharedDir) {
+		return fmt.Errorf("agent CopyFile: %q is not under %s", path, guestSharedDir)
+	}
+	size := int64(len(data))
+	for off := int64(0); ; {
+		end := min(off+copyFileChunkSize, size)
+		req := &agentpb.CopyFileRequest{
+			Path:     path,
+			FileSize: size,
+			FileMode: unix.S_IFREG | uint32(perm.Perm()),
+			DirMode:  unix.S_IFDIR | 0o755,
+			Offset:   off,
+			Data:     data[off:end],
+		}
+		if err := a.client.Call(ctx, "grpc.AgentService", "CopyFile", req, &emptypb.Empty{}); err != nil {
+			return fmt.Errorf("agent CopyFile %q: %w", path, err)
+		}
+		off = end
+		if off >= size {
+			return nil
+		}
+	}
 }
 
 // StartContainer execs the container's init process (pivots into the rootfs the

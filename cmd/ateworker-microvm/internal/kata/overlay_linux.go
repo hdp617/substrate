@@ -52,6 +52,10 @@ const (
 	// typeVirtioFS / virtioFSDriver are the agent fstype + driver for it.
 	typeVirtioFS   = "virtiofs"
 	virtioFSDriver = "virtio-fs"
+	// ephemeralDriver / typeTmpfs are the agent driver + fstype for a guest
+	// tmpfs.
+	ephemeralDriver = "ephemeral"
+	typeTmpfs       = "tmpfs"
 	// guestSharedDir is where the agent mounts the kataShared tag in the guest;
 	// per-container rootfs then lives at <guestSharedDir>/<cid>/rootfs, and the
 	// volume shares at the subdirectories ocispec.ShapeMicroVM points binds at.
@@ -422,23 +426,51 @@ func ReconstructSharedDirFromImage(ctx context.Context, bundleRootfs, restoreID,
 type CreateSandboxOpts struct {
 	SandboxID string
 	Hostname  string
+	// TmpfsDir, when set, is a directory under the share at which the agent
+	// mounts a guest tmpfs after the share itself. Files written there live in
+	// guest memory, where CopyFile can reach them.
+	TmpfsDir string
 }
 
 // CreateSandboxForActor creates the guest sandbox with the kataShared virtio-fs mount
 // (the merged rootfs trees, durable volumes, CSI volumes, and system-info
-// volumes every container runs on). Mirrors kata startSandbox.
+// volumes every container runs on), plus the guest tmpfs opts asks for.
+// Mirrors kata startSandbox.
 func (a *AgentClient) CreateSandboxForActor(ctx context.Context, opts CreateSandboxOpts) error {
+	storages, err := sandboxStorages(opts)
+	if err != nil {
+		return err
+	}
+	return a.CreateSandbox(ctx, &agentpb.CreateSandboxRequest{
+		Hostname:  opts.Hostname,
+		SandboxId: opts.SandboxID,
+		Storages:  storages,
+	})
+}
+
+// sandboxStorages returns the storages the agent mounts, in order, when it
+// creates the sandbox.
+func sandboxStorages(opts CreateSandboxOpts) ([]*agentpb.Storage, error) {
 	storages := []*agentpb.Storage{{
 		Driver:     virtioFSDriver,
 		Source:     FsTag,
 		Fstype:     typeVirtioFS,
 		MountPoint: guestSharedDir,
 	}}
-	return a.CreateSandbox(ctx, &agentpb.CreateSandboxRequest{
-		Hostname:  opts.Hostname,
-		SandboxId: opts.SandboxID,
-		Storages:  storages,
-	})
+	if opts.TmpfsDir == "" {
+		return storages, nil
+	}
+	if !filepath.IsLocal(opts.TmpfsDir) {
+		return nil, fmt.Errorf("guest tmpfs dir %q is not a path under the share", opts.TmpfsDir)
+	}
+	// The agent's ephemeral driver creates the mount point and mounts a fresh
+	// tmpfs there.
+	return append(storages, &agentpb.Storage{
+		Driver:     ephemeralDriver,
+		Source:     typeTmpfs,
+		Fstype:     typeTmpfs,
+		MountPoint: guestSharedDir + filepath.Clean(opts.TmpfsDir),
+	}), nil
 }
 
 // StartRootfsContainer creates + starts one container on the shared merged rootfs —
