@@ -39,17 +39,20 @@ type statResponse struct {
 	Error string `json:"error"`
 }
 
-// layerOwners are paths whose owner and mode the probe image's layers record.
-// .ko.yaml builds the probe on the root distroless static base, whose base
-// layer has /home/nonroot as drwx------ owned by 65532:65532 (distroless's
-// nonroot user), /var/tmp as root-owned 1777, and root-owned system files.
+// layerOwners are paths whose owner and mode the actor must see. All but
+// /dev/shm come from the probe image's layers. .ko.yaml builds the probe on
+// the root distroless static base, whose base layer has /home/nonroot as
+// drwx------ owned by 65532:65532 (distroless's nonroot user), /var/tmp as
+// root-owned 1777, and root-owned system files.
 // /var/tmp, not /tmp, checks the sticky bit: gVisor mounts its own 1777 tmpfs
-// over an empty /tmp.
+// over an empty /tmp. Both classes mount a root-owned 1777 tmpfs at /dev/shm,
+// so non-root processes can use shm_open.
 var layerOwners = []statResponse{
 	{Path: "/home/nonroot", UID: 65532, GID: 65532, Mode: "drwx------"},
 	{Path: "/var/tmp", UID: 0, GID: 0, Mode: "dtrwxrwxrwx"},
 	{Path: "/etc/passwd", UID: 0, GID: 0, Mode: "-rw-r--r--"},
 	{Path: "/home", UID: 0, GID: 0, Mode: "drwxr-xr-x"},
+	{Path: "/dev/shm", UID: 0, GID: 0, Mode: "dtrwxrwxrwx"},
 }
 
 // TestImageLayerOwnership asserts that files keep the owners the image's
@@ -218,7 +221,7 @@ func checkOwners(t *testing.T, ctx context.Context, rc *e2e.RouterClient, ref *a
 			continue
 		}
 		if got.UID != want.UID || got.GID != want.GID || got.Mode != want.Mode {
-			t.Errorf("%s inside the actor is %s %d:%d, want %s %d:%d as the image's layer records it",
+			t.Errorf("%s inside the actor is %s %d:%d, want %s %d:%d",
 				want.Path, got.Mode, got.UID, got.GID, want.Mode, want.UID, want.GID)
 		}
 	}

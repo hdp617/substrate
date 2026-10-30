@@ -56,6 +56,23 @@ var parityMountPaths = []string{"/var/data", "/run/ate", "/mnt/csi", "/ate"}
 
 var paritySize = sizing.SandboxSize{MilliCPU: 500, MemoryBytes: 512 << 20}
 
+// parityShapers shape a spec built from parityOptions for each runtime.
+var parityShapers = []struct {
+	runtime string
+	shape   func(*specs.Spec) error
+}{{
+	runtime: "gvisor",
+	shape: func(s *specs.Spec) error {
+		ShapeGVisor(s, GVisorOptions{ActorUID: testActorUID, ContainerName: "app", Size: paritySize})
+		return nil
+	},
+}, {
+	runtime: "microvm",
+	shape: func(s *specs.Spec) error {
+		return ShapeMicroVM(s, MicroVMOptions{ActorDirs: parityActorDirs, ContainerName: "app"})
+	},
+}}
+
 // Build's output contains no runtime-specific literals.
 func TestBuild_IsRuntimeNeutral(t *testing.T) {
 	b, err := json.Marshal(Build(parityOptions))
@@ -71,21 +88,7 @@ func TestBuild_IsRuntimeNeutral(t *testing.T) {
 
 // Both shapers keep every declared volume mount, with a non-empty source.
 func TestShapers_PreserveEveryVolumeMount(t *testing.T) {
-	for _, tc := range []struct {
-		runtime string
-		shape   func(*specs.Spec) error
-	}{{
-		runtime: "gvisor",
-		shape: func(s *specs.Spec) error {
-			ShapeGVisor(s, GVisorOptions{ActorUID: testActorUID, ContainerName: "app", Size: paritySize})
-			return nil
-		},
-	}, {
-		runtime: "microvm",
-		shape: func(s *specs.Spec) error {
-			return ShapeMicroVM(s, MicroVMOptions{ActorDirs: parityActorDirs, ContainerName: "app"})
-		},
-	}} {
+	for _, tc := range parityShapers {
 		t.Run(tc.runtime, func(t *testing.T) {
 			spec := Build(parityOptions)
 			if err := tc.shape(spec); err != nil {
@@ -109,23 +112,47 @@ func TestShapers_PreserveEveryVolumeMount(t *testing.T) {
 	}
 }
 
+// Both shapers emit the same /dev/shm mount, and a volume at /dev/shm
+// replaces it.
+func TestShapers_ShmMount(t *testing.T) {
+	shmVolume := proto.Clone(parityOptions.Container).(*ateworkerpb.Container)
+	shmVolume.DurableDirVolumeMounts = append(shmVolume.DurableDirVolumeMounts, &ateworkerpb.VolumeMount{Name: "shm", MountPath: shmPath})
+	for _, tc := range []struct {
+		name      string
+		container *ateworkerpb.Container
+		wantType  string
+	}{
+		{"default", parityOptions.Container, "tmpfs"},
+		{"volume at /dev/shm", shmVolume, "bind"},
+	} {
+		for _, s := range parityShapers {
+			t.Run(tc.name+"/"+s.runtime, func(t *testing.T) {
+				opts := parityOptions
+				opts.Container = tc.container
+				spec := Build(opts)
+				if err := s.shape(spec); err != nil {
+					t.Fatalf("shaping the spec: %v", err)
+				}
+				var got []specs.Mount
+				for _, m := range spec.Mounts {
+					if m.Destination == shmPath {
+						got = append(got, m)
+					}
+				}
+				if len(got) != 1 || got[0].Type != tc.wantType {
+					t.Fatalf("mounts at /dev/shm = %+v, want one of type %s", got, tc.wantType)
+				}
+				if tc.wantType == "tmpfs" && !reflect.DeepEqual(got[0], shmMount()) {
+					t.Errorf("/dev/shm mount = %+v, want %+v", got[0], shmMount())
+				}
+			})
+		}
+	}
+}
+
 // Both shapers leave the process identity and cwd as Build set them.
 func TestShapers_PreserveProcess(t *testing.T) {
-	for _, tc := range []struct {
-		runtime string
-		shape   func(*specs.Spec) error
-	}{{
-		runtime: "gvisor",
-		shape: func(s *specs.Spec) error {
-			ShapeGVisor(s, GVisorOptions{ActorUID: testActorUID, ContainerName: "app", Size: paritySize})
-			return nil
-		},
-	}, {
-		runtime: "microvm",
-		shape: func(s *specs.Spec) error {
-			return ShapeMicroVM(s, MicroVMOptions{ActorDirs: parityActorDirs, ContainerName: "app"})
-		},
-	}} {
+	for _, tc := range parityShapers {
 		t.Run(tc.runtime, func(t *testing.T) {
 			opts := parityOptions
 			opts.Container = proto.Clone(parityOptions.Container).(*ateworkerpb.Container)
@@ -163,8 +190,8 @@ func TestShapeMicroVM_TranslatesSourcesIntoTheShare(t *testing.T) {
 		}
 	}
 	// Guest system mounts replace the host's.
-	if got := mountFor(t, spec, "/dev/shm").Source; got != "shm" {
-		t.Errorf("/dev/shm source = %q, want the guest system mount", got)
+	if got := mountFor(t, spec, "/dev").Options; !slices.Contains(got, "size=65536k") {
+		t.Errorf("/dev options = %v, want the guest system mount", got)
 	}
 }
 

@@ -56,15 +56,19 @@ type MicroVMOptions struct {
 	ContainerName string
 }
 
-// ShapeMicroVM replaces host system mounts with guest mounts, repoints volume
-// bind mounts to guest share paths, fills in kata's default resources, and
-// lifts the guest's privileged-port limit. It must run on an unshaped spec,
-// and errors on a bind it cannot place in the guest.
+// ShapeMicroVM replaces host system mounts with guest mounts, keeps Build's
+// /dev/shm, repoints volume bind mounts to guest share paths, fills in kata's
+// default resources, and lifts the guest's privileged-port limit. It must run
+// on an unshaped spec, and errors on a bind it cannot place in the guest.
 func ShapeMicroVM(spec *specs.Spec, o MicroVMOptions) error {
 	// Translate volume bind mounts into guest share paths.
+	mounts := guestSystemMounts()
 	volumes := make([]specs.Mount, 0, len(spec.Mounts))
 	for _, m := range spec.Mounts {
 		if m.Type != "bind" {
+			if m.Destination == shmPath {
+				mounts = append(mounts, m)
+			}
 			continue
 		}
 		src, err := guestVolumeSource(m.Source, o.ActorDirs, o.ContainerName)
@@ -81,7 +85,7 @@ func ShapeMicroVM(spec *specs.Spec, o MicroVMOptions) error {
 		}
 		volumes = append(volumes, m)
 	}
-	spec.Mounts = append(guestSystemMounts(), volumes...)
+	spec.Mounts = append(mounts, volumes...)
 
 	if spec.Linux == nil {
 		spec.Linux = &specs.Linux{}
@@ -142,13 +146,16 @@ func guestVolumeSource(hostPath string, actorDirs *ateworkerpb.ActorDirs, contai
 	return "", fmt.Errorf("host path %q is not staged into the guest share", hostPath)
 }
 
-// guestSystemMounts returns the standard kata guest mount set.
+// guestSystemMounts returns the standard kata guest mount set. /dev/shm comes
+// from Build.
+//
+// /run is a guest tmpfs because MEMORY restores of the rootfs overlay would
+// lose the unix sockets daemons create there. The upper's tar skips sockets.
 func guestSystemMounts() []specs.Mount {
 	return []specs.Mount{
 		{Destination: "/proc", Type: "proc", Source: "proc", Options: []string{"nosuid", "noexec", "nodev"}},
 		{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
 		{Destination: "/dev/pts", Type: "devpts", Source: "devpts", Options: []string{"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620", "gid=5"}},
-		{Destination: "/dev/shm", Type: "tmpfs", Source: "shm", Options: []string{"nosuid", "noexec", "nodev", "mode=1777", "size=65536k"}},
 		{Destination: "/dev/mqueue", Type: "mqueue", Source: "mqueue", Options: []string{"nosuid", "noexec", "nodev"}},
 		{Destination: "/sys", Type: "sysfs", Source: "sysfs", Options: []string{"nosuid", "noexec", "nodev", "ro"}},
 		{Destination: "/run", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
