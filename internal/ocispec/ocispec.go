@@ -23,6 +23,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"go.ate.dev/substrate/internal/imagecache"
@@ -169,8 +170,9 @@ func Build(o Options) *specs.Spec {
 
 	// Mount order across volume kinds does not matter: the API rejects mounts
 	// that nest under one another.
+	var volumes []specs.Mount
 	bind := func(dest, src, mode string) {
-		spec.Mounts = append(spec.Mounts, specs.Mount{
+		volumes = append(volumes, specs.Mount{
 			Destination: dest,
 			Type:        "bind",
 			Source:      src,
@@ -191,8 +193,27 @@ func Build(o Options) *specs.Spec {
 	for _, m := range container.GetImageVolumeMounts() {
 		bind(m.GetMountPath(), imagecache.ImageVolumeMountPath(bundlePath, m.GetName()), "ro")
 	}
+	// A volume mounted at /dev/shm replaces the system one.
+	if !slices.ContainsFunc(volumes, func(m specs.Mount) bool { return m.Destination == shmPath }) {
+		spec.Mounts = append(spec.Mounts, shmMount())
+	}
+	spec.Mounts = append(spec.Mounts, volumes...)
 
 	return spec
+}
+
+const shmPath = "/dev/shm"
+
+// shmMount returns the /dev/shm mount of both sandbox classes. It has the size
+// and mode Kubernetes gives a runc container. Unlike in a Kubernetes pod, each
+// container gets its own /dev/shm.
+func shmMount() specs.Mount {
+	return specs.Mount{
+		Destination: shmPath,
+		Type:        "tmpfs",
+		Source:      "shm",
+		Options:     []string{"nosuid", "noexec", "nodev", "mode=1777", "size=65536k"},
+	}
 }
 
 // Save writes spec as the OCI spec of the bundle at bundlePath.
